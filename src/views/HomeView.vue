@@ -9,7 +9,7 @@ const data = ref(null)
 async function fetchData(){
   try {
     const resp = await getPlatformInfo()
-    data.value = resp.data
+    data.value = resp
   } catch (error) {
     console.error('请求失败：', error)
   }
@@ -19,8 +19,8 @@ async function fetchData(){
 </script>
 
 <template>
-  <div>{{ data }}</div>
   <el-button type="primary" @click="fetchData">获取数据</el-button>
+  <div>{{ data }}</div>
 </template>
 
 

@@ -43,8 +43,6 @@ export function getVersion(params) {
     method: 'get',
     params
   });
-
-  
 }
 
 // 其他业务接口...
