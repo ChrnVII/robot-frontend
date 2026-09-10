@@ -7,23 +7,17 @@ const route = useRoute()
 const isPlatformOnline = ref(false)
 
 const navigation = [
-
   { label: '运行总览', path: '/home', icon: '⌂' },
   { label: '智能检测', path: '/detect', icon: '◉' },
   { label: '任务管理', path: '/tasks', icon: '≡' },
-
-
   { label: '摄像头', path: '/cam', icon: '▣' },
   { label: '升降控制', path: '/lift', icon: '↕' },
   { label: '移动底盘', path: '/agv', icon: '▰' },
   { label: '地图站点', path: '/map', icon: '⌖' },
-
-
   { label: '参数设置', path: '/params', icon: '⚙' },
   { label: '运行数据', path: '/runs', icon: '◫' },
   { label: '告警数据', path: '/alerts', icon: '△' },
   { label: '默认任务', path: '/task-tmpl', icon: '✦' },
-
 ]
 
 
