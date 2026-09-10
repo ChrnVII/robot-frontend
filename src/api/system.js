@@ -28,7 +28,7 @@ export function getPlatformInfo(params) {
 }
 
 // 判断平台是否已就绪
-export function getPlatfromReady(params) {
+export function getPlatformReady(params) {
   return request({
     url: '/readyz',
     method: 'get',

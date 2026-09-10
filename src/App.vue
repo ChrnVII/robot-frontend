@@ -1,10 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { getPlatformInfo } from '@/api/system'
+import { getPlatformReady } from '@/api/system'
 
 const route = useRoute()
-
 const isPlatformOnline = ref(false)
 
 const navigation = [
@@ -32,9 +31,9 @@ const pageTitle = computed(() => {
   return navigation.find((item) => item.path === route.path)?.label ?? '运行总览'
 })
 
-async function fetchPlatformInfo(){
+async function fetchReady(){
   try {
-    const resp = await getPlatformInfo()
+    const resp = await getPlatformReady()
     isPlatformOnline.value = resp?.status === 200
   } catch (error) {
     console.error('请求失败：', error)
@@ -44,7 +43,7 @@ async function fetchPlatformInfo(){
 
 onMounted(() => {
   requestAnimationFrame(() => {
-    fetchPlatformInfo()
+    fetchReady()
   })
 })
 
