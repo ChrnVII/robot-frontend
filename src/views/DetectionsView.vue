@@ -1,125 +1,1325 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getDetectionImage, getDetections, getInspectionStatus, startInspection, stopInspection } from '@/api/inspection'
+import {
+  ArrowLeft, ArrowRight, Bottom, FolderOpened, Loading, Microphone, Picture, Refresh, Tools, Top,
+  VideoCamera, VideoCameraFilled, VideoPause, VideoPlay
+} from '@element-plus/icons-vue'
+import { getPlatformInfo } from '@/api/system'
+import {
+  apiErrorMessage, captureMedia, getDetections, getInspectionConfig, getInspectionImageUrl,
+  getInspectionStatus, getInspectionStreamUrl, getRobotState, moveInspectionLift, startInspection,
+  stopInspection, stopInspectionLift, unwrap
+} from '@/api/inspection'
 
-const form = reactive({ taskRunId: 'inspection-demo-001', mode: 'four', durationSeconds: 300 })
-const modeOptions = [
-  { label: '单摄像头', value: 'single', count: 1 },
-  { label: '四路巡检', value: 'four', count: 4 },
-  { label: '八路巡检', value: 'eight', count: 8 },
-]
-const cameras = Array.from({ length: 8 }, (_, index) => ({ id: `cam${String(index + 1).padStart(2, '0')}`, name: `摄像头 ${String(index + 1).padStart(2, '0')}` }))
-const status = ref({ taskRunId: form.taskRunId, mode: 'four', state: 'stopped', processed: 0, positive: 0, cameraErrors: {} })
+// 后端巡检模式只接受 1 / 4 / 8 路摄像头，通道数量决定 mode。
+const MODE_BY_CAMERA_COUNT = { 1: 'single', 4: 'four', 8: 'eight' }
+const MODE_LABELS = { single: '单路', four: '四路', eight: '八路' }
+const STATE_LABELS = {
+  idle: '等待启动',
+  starting: '启动中',
+  running: '检测进行中',
+  stopping: '停止中',
+  completed: '已完成',
+  stopped: '已停止',
+  failed: '失败'
+}
+const STATE_TAGS = {
+  idle: 'info',
+  starting: 'warning',
+  running: 'success',
+  stopping: 'warning',
+  completed: 'primary',
+  stopped: 'info',
+  failed: 'danger'
+}
+const TERMINAL_STATES = ['completed', 'stopped', 'failed']
+const HEALTH_LABELS = { ok: '正常', healthy: '正常', degraded: '降级', warning: '告警', error: '故障', unavailable: '不可用' }
+const QUALITY_LABELS = { valid: '有效', invalid: '无效', uncertain: '不确定', degraded: '降级' }
+
+// 八路巡检通道是机器人固定的设备拓扑，通道状态一律以后端设备接口为准。
+const CAMERA_CHANNELS = Array.from({ length: 8 }, (_, index) => {
+  const code = String(index + 1).padStart(2, '0')
+  return { id: `cam${code}`, label: `摄像头 ${code}` }
+})
+const ACTIVE_INSPECTION_KEY = 'inspection-robot.active-inspection'
+const SELECTED_CAMERAS_KEY = 'inspection-robot.selected-cameras'
+const AUDIO_PARAMETERS = { sample_rate: 16000, channels: 1, duration_seconds: 3 }
+const POLL_INTERVAL = 2500
+const DEVICE_STATE_INTERVAL = 15000
+const RESULT_PAGE_SIZE = 24
+const STREAM_MAX_ATTEMPTS = 4
+
+const cameras = reactive(CAMERA_CHANNELS.map((channel) => ({ ...channel, selected: false })))
+const deviceStates = ref({})
+const deviceStatesReady = ref(false)
+const deviceStatesError = ref('')
+const platform = ref(null)
+
+const runtime = reactive({ environments: [], modelPath: '', configPath: '', resultPath: '', hint: '', error: '' })
+const runtimeLoading = ref(false)
+const form = reactive({ environment: '', durationSeconds: 0 })
+
+const audio = reactive({ capturing: false, asset: null })
+const liftBusy = ref('')
+
+const task = reactive({
+  taskRunId: '',
+  mode: '',
+  state: 'idle',
+  processed: 0,
+  positive: 0,
+  startedAt: null,
+  finishedAt: null,
+  error: '',
+  cameraErrors: {}
+})
+
 const detections = ref([])
-const selectedDetection = ref(null)
-const loading = ref(false)
+const resultsTotal = ref(0)
+const resultsMore = ref(false)
+const resultIndex = ref(0)
 const resultsLoading = ref(false)
-const isDemo = ref(true)
-const imageUrl = ref('')
-let timer
+const resultsError = ref('')
+const liveFrames = reactive({})
+const busy = ref('')
+const restoring = ref(false)
 
-const demoDetections = [
-  { eventType: 'detection', taskRunId: form.taskRunId, cameraId: 'cam01', frameId: 128, detectionId: 'cam01-00000128', capturedAt: '2026-09-10T10:21:38+08:00', detections: [{ label: '人员未佩戴安全帽', confidence: 0.96 }], countByLabel: { '人员未佩戴安全帽': 1 }, latencyMs: 82, resultImageId: 'cam01:00000128_result.jpg' },
-  { eventType: 'detection', taskRunId: form.taskRunId, cameraId: 'cam02', frameId: 97, detectionId: 'cam02-00000097', capturedAt: '2026-09-10T10:20:55+08:00', detections: [{ label: '设备温度异常', confidence: 0.91 }], countByLabel: { '设备温度异常': 1 }, latencyMs: 76, resultImageId: 'cam02:00000097_result.jpg' },
-  { eventType: 'detection', taskRunId: form.taskRunId, cameraId: 'cam03', frameId: 73, detectionId: 'cam03-00000073', capturedAt: '2026-09-10T10:20:11+08:00', detections: [{ label: '区域入侵', confidence: 0.88 }], countByLabel: { '区域入侵': 1 }, latencyMs: 95, resultImageId: 'cam03:00000073_result.jpg' },
-  { eventType: 'detection', taskRunId: form.taskRunId, cameraId: 'cam04', frameId: 42, detectionId: 'cam04-00000042', capturedAt: '2026-09-10T10:19:43+08:00', detections: [{ label: '烟火疑似', confidence: 0.84 }], countByLabel: { '烟火疑似': 1 }, latencyMs: 103, resultImageId: 'cam04:00000042_result.jpg' },
-]
+let pollTimer = null
+let deviceTimer = null
+let stream = null
+let streamRetryTimer = null
+let streamAttempts = 0
+let resultsAutoLoaded = false
 
-const currentMode = computed(() => modeOptions.find((option) => option.value === form.mode) || modeOptions[1])
-const activeCameras = computed(() => cameras.slice(0, currentMode.value.count))
-const isRunning = computed(() => ['starting', 'running', 'stopping'].includes(status.value.state))
-const stateText = computed(() => ({ starting: '启动中', running: '运行中', stopping: '停止中', completed: '已完成', stopped: '已停止', failed: '失败' }[status.value.state] || '未连接'))
-const stateType = computed(() => ({ running: 'success', completed: 'success', starting: 'warning', stopping: 'warning', failed: 'danger' }[status.value.state] || 'info'))
-const positiveRate = computed(() => status.value.processed ? `${((status.value.positive / status.value.processed) * 100).toFixed(1)}%` : '0.0%')
+const selectedCameras = computed(() => cameras.filter((camera) => camera.selected))
+const mode = computed(() => MODE_BY_CAMERA_COUNT[selectedCameras.value.length] || '')
+const modeLabel = computed(() => MODE_LABELS[task.mode || mode.value] || '未启动')
+const isRunning = computed(() => ['starting', 'running', 'stopping'].includes(task.state))
+const stateLabel = computed(() => STATE_LABELS[task.state] || task.state || STATE_LABELS.idle)
+const stateTag = computed(() => STATE_TAGS[task.state] || 'info')
+const cameraErrorList = computed(() => Object.entries(task.cameraErrors || {}).map(([id, message]) => `${id}: ${message}`))
 
-function unwrap(response) {
-  const body = response?.data ?? response
-  return body?.data ?? body
+const environmentPlaceholder = computed(() => {
+  if (runtimeLoading.value) return '读取中…'
+  return runtime.environments.length ? '请选择运行环境' : '后端未返回可用运行环境'
+})
+const platformHint = computed(() => {
+  if (!platform.value) return ''
+  const { robotId, mode: platformMode } = platform.value
+  return [robotId && `机器人 ${robotId}`, platformMode && `模式 ${platformMode}`, platform.value.apiVersion && `API ${platform.value.apiVersion}`]
+    .filter(Boolean)
+    .join(' · ')
+})
+const environmentHint = computed(() => runtime.hint || (runtime.error ? `运行配置读取失败：${runtime.error}` : '虚拟环境、模型权重和结果目录由后端巡检配置提供'))
+
+const audioDescription = computed(() => {
+  if (audio.capturing) return '正在采集音频…'
+  if (audio.asset?.assetId) {
+    const size = Number(audio.asset.sizeBytes)
+    return Number.isFinite(size) ? `已保存 · ${audio.asset.assetId} · ${(size / 1024).toFixed(1)} KB` : `已保存 · ${audio.asset.assetId}`
+  }
+  return `点击采集 ${AUDIO_PARAMETERS.duration_seconds} 秒音频`
+})
+
+const currentResult = computed(() => detections.value[resultIndex.value] || null)
+const currentResultImageUrl = computed(() => getInspectionImageUrl(task.taskRunId, currentResult.value?.resultImageId))
+const currentLiveFrame = computed(() => {
+  const cameraId = currentResult.value?.cameraId
+  if (cameraId && liveFrames[cameraId]) return liveFrames[cameraId]
+  const keys = Object.keys(liveFrames)
+  return keys.length ? liveFrames[keys[0]] : ''
+})
+const previewSrc = computed(() => currentLiveFrame.value || currentResultImageUrl.value)
+const previewList = computed(() => (previewSrc.value ? [previewSrc.value] : []))
+const previewEmptyText = computed(() => {
+  if (resultsLoading.value) return '结果加载中…'
+  if (detections.value.length) return '当前检测记录没有返回标注图'
+  return '暂无检测结果图，启动检测后点击「加载结果图」'
+})
+const currentLabels = computed(() => {
+  const result = currentResult.value
+  if (!result) return []
+  if (result.countByLabel && typeof result.countByLabel === 'object') {
+    return Object.entries(result.countByLabel).map(([label, count]) => `${label} × ${count}`)
+  }
+  if (Array.isArray(result.detections)) {
+    return result.detections.map((item) => item?.label || item?.className || item?.class).filter(Boolean)
+  }
+  return []
+})
+
+// 设备状态：一次 robot/state 覆盖全部通道，避免 8 次单独请求。
+function normalizeDeviceStates(payload) {
+  const source = payload?.devices || payload?.deviceStates || payload
+  if (!source || typeof source !== 'object') return {}
+  const entries = Array.isArray(source)
+    ? source.filter((item) => item?.deviceId).map((item) => [item.deviceId, item])
+    : Object.entries(source).filter(([, value]) => value && typeof value === 'object')
+  return entries.reduce((result, [key, value]) => {
+    result[String(value.deviceId || key).toLowerCase()] = value
+    return result
+  }, {})
 }
-function seedDemo() {
-  detections.value = demoDetections
-  selectedDetection.value = detections.value[0]
-  status.value = { ...status.value, state: 'stopped', processed: 1280, positive: 4 }
+
+function resolveDeviceState(deviceId) {
+  const states = deviceStates.value
+  const key = String(deviceId || '').toLowerCase()
+  if (states[key]) return states[key]
+  const digits = key.replace(/\D/g, '')
+  if (!digits) return null
+  const matched = Object.keys(states).find((item) => /cam|video/.test(item) && item.replace(/\D/g, '') === digits)
+  return matched ? states[matched] : null
 }
-async function refreshStatus(showMessage = false) {
+
+function cameraDescription(camera) {
+  const state = resolveDeviceState(camera.id)
+  if (!state) {
+    if (deviceStatesReady.value) return '后端未上报该通道状态'
+    return deviceStatesError.value || '状态读取中…'
+  }
+  const parts = []
+  if (state.health) parts.push(HEALTH_LABELS[state.health] || state.health)
+  if (state.quality) parts.push(QUALITY_LABELS[state.quality] || state.quality)
+  if (!parts.length && state.values && typeof state.values === 'object') {
+    const streaming = state.values.streaming ?? state.values.online ?? state.values.enabled
+    if (streaming !== undefined) parts.push(streaming ? '视频流已开' : '视频流已关')
+  }
+  return parts.join(' · ') || '已上报状态'
+}
+
+async function loadDeviceStates() {
   try {
-    const data = unwrap(await getInspectionStatus(form.taskRunId))
-    if (data && typeof data === 'object') { status.value = { ...status.value, ...data }; isDemo.value = false }
+    deviceStates.value = normalizeDeviceStates(unwrap(await getRobotState(), {}))
+    deviceStatesReady.value = true
+    deviceStatesError.value = ''
   } catch (error) {
-    if (showMessage) ElMessage.warning('暂时无法连接后端，当前显示演示数据')
+    deviceStatesReady.value = false
+    deviceStatesError.value = apiErrorMessage(error, '设备状态读取失败')
   }
 }
-async function refreshDetections(showMessage = true) {
-  resultsLoading.value = true
-  try {
-    const data = unwrap(await getDetections(form.taskRunId, { offset: 0, limit: 50 }))
-    const items = Array.isArray(data?.items) ? data.items : []
-    if (items.length) { detections.value = items; selectedDetection.value = items[0]; isDemo.value = false }
-    else if (showMessage) ElMessage.info('当前巡检暂无检测结果')
-  } catch (error) {
-    if (showMessage) ElMessage.warning('无法读取检测结果，保留演示数据')
-  } finally { resultsLoading.value = false }
-}
-async function beginInspection() {
-  loading.value = true
-  try {
-    const response = await startInspection({ mode: form.mode, taskRunId: form.taskRunId, durationSeconds: Number(form.durationSeconds) || 0, cameraIds: activeCameras.value.map((camera) => camera.id) })
-    const data = unwrap(response)
-    status.value = { ...status.value, ...(data || {}), taskRunId: form.taskRunId, mode: form.mode, state: data?.state || 'starting' }
-    isDemo.value = false
-    ElMessage.success('巡检任务已启动')
-    beginPolling()
-  } catch (error) { ElMessage.error('启动失败，请检查服务连接') }
-  finally { loading.value = false }
-}
-async function stopCurrentInspection() {
-  if (!form.taskRunId) return
-  loading.value = true
-  try { await stopInspection(form.taskRunId); status.value = { ...status.value, state: 'stopping' }; ElMessage.success('停止信号已提交'); beginPolling() }
-  catch (error) { ElMessage.error('停止失败，请检查服务连接') }
-  finally { loading.value = false }
-}
-function beginPolling() {
-  clearInterval(timer)
-  timer = setInterval(async () => { await refreshStatus(); if (!isRunning.value) { clearInterval(timer); await refreshDetections(false) } }, 3000)
-}
-async function selectDetection(item) {
-  selectedDetection.value = item
-  if (!item?.resultImageId) return
-  try {
-    const response = await getDetectionImage(form.taskRunId, item.resultImageId)
-    if (imageUrl.value) URL.revokeObjectURL(imageUrl.value)
-    imageUrl.value = URL.createObjectURL(response.data)
-  } catch (error) { imageUrl.value = '' }
-}
-function formatTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '--' }
-function labelOf(item) { return Object.keys(item?.countByLabel || {})[0] || item?.detections?.[0]?.label || '检测事件' }
 
-onMounted(() => { seedDemo(); refreshStatus(); refreshDetections(false) })
-onBeforeUnmount(() => { clearInterval(timer); if (imageUrl.value) URL.revokeObjectURL(imageUrl.value) })
+async function loadPlatformInfo() {
+  try {
+    platform.value = unwrap(await getPlatformInfo(), null)
+  } catch {
+    platform.value = null
+  }
+}
+
+// 运行配置：虚拟环境、模型权重、配置文件和结果目录都由后端配置接口返回，前端只做只读展示。
+function pickText(source, keys) {
+  for (const key of keys) {
+    const value = source?.[key]
+    if (typeof value === 'string' && value.trim()) return value
+    if (value && typeof value === 'object' && typeof value.path === 'string') return value.path
+  }
+  return ''
+}
+
+function applyRuntimeConfig(data) {
+  const source = data && typeof data === 'object' ? data : {}
+  const rawList = source.environments || source.profiles || source.runtimes || source.virtualEnvironments
+  const list = []
+  if (Array.isArray(rawList)) {
+    rawList.forEach((item) => {
+      const value = typeof item === 'string' ? item : item?.value ?? item?.id ?? item?.name
+      if (!value) return
+      list.push({
+        value: String(value),
+        label: typeof item === 'string' ? item : String(item.label || item.name || value),
+        detail: String((typeof item === 'object' && (item.detail || item.description)) || '')
+      })
+    })
+  }
+  const single = source.environment || source.virtualEnvironment
+  if (!list.length && single) {
+    list.push({ value: String(single), label: String(single), detail: String(source.environmentDetail || '') })
+  }
+  runtime.environments = list
+  form.environment = list.some((item) => item.value === form.environment) ? form.environment : list[0]?.value || ''
+  runtime.modelPath = pickText(source, ['modelPath', 'model', 'weights', 'modelWeights'])
+  runtime.configPath = pickText(source, ['configPath', 'configFile', 'inspectionConfig'])
+  runtime.resultPath = pickText(source, ['resultPath', 'resultDir', 'outputDir', 'resultsDir'])
+  runtime.hint = list.find((item) => item.value === form.environment)?.detail || ''
+}
+
+async function loadRuntimeConfig() {
+  runtimeLoading.value = true
+  try {
+    applyRuntimeConfig(unwrap(await getInspectionConfig({ configType: 'inspection' }), {}))
+    runtime.error = ''
+  } catch (error) {
+    runtime.environments = []
+    form.environment = ''
+    runtime.error = apiErrorMessage(error, '运行配置读取失败')
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
+function readJson(key) {
+  try {
+    return JSON.parse(window.localStorage.getItem(key) || 'null')
+  } catch {
+    return null
+  }
+}
+
+function applyCameraSelection(cameraIds) {
+  const selected = new Set(cameraIds || [])
+  cameras.forEach((camera) => { camera.selected = selected.has(camera.id) })
+}
+
+function persistCameraSelection() {
+  window.localStorage.setItem(SELECTED_CAMERAS_KEY, JSON.stringify(selectedCameras.value.map((camera) => camera.id)))
+}
+
+function persistActiveInspection() {
+  if (!task.taskRunId) return
+  window.localStorage.setItem(ACTIVE_INSPECTION_KEY, JSON.stringify({
+    taskRunId: task.taskRunId,
+    mode: task.mode,
+    cameraIds: selectedCameras.value.map((camera) => camera.id)
+  }))
+}
+
+function clearActiveInspection() {
+  window.localStorage.removeItem(ACTIVE_INSPECTION_KEY)
+}
+
+function toggleCamera(camera) {
+  if (isRunning.value) {
+    ElMessage.warning('检测进行中，请先停止任务再调整参与检测的摄像头')
+    return
+  }
+  camera.selected = !camera.selected
+  persistCameraSelection()
+}
+
+async function captureAudio() {
+  if (audio.capturing) return
+  audio.capturing = true
+  try {
+    const asset = unwrap(await captureMedia({
+      taskRunId: task.taskRunId || `manual-${Date.now()}`,
+      waypointId: 'inspection-audio',
+      deviceId: 'audio',
+      mediaType: 'audio',
+      parameters: AUDIO_PARAMETERS
+    }), null)
+    if (!asset?.assetId) throw new Error('后端未返回音频资产 assetId')
+    audio.asset = asset
+    ElMessage.success(`音频采集完成 · ${asset.assetId}`)
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, '音频采集失败'))
+  } finally {
+    audio.capturing = false
+  }
+}
+
+async function handleLift(action) {
+  const labels = { up: '升起', down: '下降', stop: '停止' }
+  liftBusy.value = action
+  try {
+    if (action === 'stop') await stopInspectionLift()
+    else await moveInspectionLift(action)
+    ElMessage.success(`检测升降${labels[action] || action}指令已下发`)
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, `检测升降${labels[action] || action}失败`))
+  } finally {
+    liftBusy.value = ''
+  }
+}
+
+function applyStatus(status) {
+  if (!status || typeof status !== 'object') return
+  ;['taskRunId', 'mode', 'state', 'processed', 'positive', 'startedAt', 'finishedAt', 'error', 'cameraErrors'].forEach((key) => {
+    if (status[key] !== undefined && status[key] !== null) task[key] = status[key]
+  })
+  if (isRunning.value) {
+    persistActiveInspection()
+    return
+  }
+  if (TERMINAL_STATES.includes(task.state)) {
+    stopPolling()
+    closeStream()
+    clearActiveInspection()
+    if (!resultsAutoLoaded && task.taskRunId && task.positive > 0) {
+      resultsAutoLoaded = true
+      loadResults()
+    }
+  }
+}
+
+function startPolling() {
+  stopPolling()
+  pollTimer = window.setInterval(async () => {
+    if (!task.taskRunId || !isRunning.value) return
+    try {
+      applyStatus(unwrap(await getInspectionStatus(task.taskRunId), {}))
+    } catch (error) {
+      ElMessage.error(apiErrorMessage(error, '巡检状态读取失败'))
+      stopPolling()
+    }
+  }, POLL_INTERVAL)
+}
+
+function stopPolling() {
+  if (pollTimer) window.clearInterval(pollTimer)
+  pollTimer = null
+}
+
+function scheduleStreamReconnect() {
+  if (streamRetryTimer || streamAttempts >= STREAM_MAX_ATTEMPTS) return
+  const delay = Math.min(2000 * 2 ** streamAttempts, 15000)
+  streamAttempts += 1
+  streamRetryTimer = window.setTimeout(() => {
+    streamRetryTimer = null
+    if (isRunning.value) openStream()
+  }, delay)
+}
+
+// WebSocket 只提供低延迟状态和实时标注帧，生命周期仍以轮询为准。
+function openStream() {
+  closeStream()
+  const url = getInspectionStreamUrl(task.taskRunId)
+  if (!url || typeof WebSocket === 'undefined') return
+  try {
+    stream = new WebSocket(url)
+  } catch {
+    stream = null
+    return
+  }
+  stream.onopen = () => { streamAttempts = 0 }
+  stream.onmessage = handleStreamMessage
+  stream.onerror = () => {}
+  stream.onclose = () => {
+    stream = null
+    if (isRunning.value) scheduleStreamReconnect()
+  }
+}
+
+function closeStream() {
+  if (streamRetryTimer) {
+    window.clearTimeout(streamRetryTimer)
+    streamRetryTimer = null
+  }
+  if (!stream) return
+  const current = stream
+  stream = null
+  current.onclose = null
+  current.onmessage = null
+  current.onerror = null
+  try {
+    current.close()
+  } catch {
+    // 连接已经关闭时忽略。
+  }
+}
+
+function handleStreamMessage(event) {
+  let payload
+  try {
+    payload = JSON.parse(event.data)
+  } catch {
+    return
+  }
+  const data = payload?.data || {}
+  if (data.status) applyStatus(data.status)
+  if (!detections.value.length && Array.isArray(data.detections?.items) && data.detections.items.length) {
+    detections.value = data.detections.items
+    resultsTotal.value = Number(data.detections.total) || data.detections.items.length
+    resultsMore.value = detections.value.length < resultsTotal.value
+    resultIndex.value = 0
+  }
+  const frames = data.frames?.frames || data.frames
+  if (frames && typeof frames === 'object' && !Array.isArray(frames)) {
+    Object.entries(frames).forEach(([cameraId, frame]) => {
+      if (frame?.available && frame.jpegBase64) {
+        liveFrames[frame.cameraId || cameraId] = `data:image/jpeg;base64,${frame.jpegBase64}`
+      }
+    })
+    return
+  }
+  const frame = data.frame
+  if (frame?.available && frame.jpegBase64) {
+    liveFrames[frame.cameraId || 'cam01'] = `data:image/jpeg;base64,${frame.jpegBase64}`
+  }
+}
+
+async function startDetection() {
+  const cameraIds = selectedCameras.value.map((camera) => camera.id)
+  const startMode = MODE_BY_CAMERA_COUNT[cameraIds.length]
+  if (!startMode) {
+    ElMessage.warning('请选择 1 路、4 路或 8 路摄像头后再开始检测')
+    return
+  }
+  busy.value = 'start'
+  try {
+    const started = unwrap(await startInspection({
+      mode: startMode,
+      cameraIds,
+      durationSeconds: Number(form.durationSeconds) || 0
+    }), {})
+    detections.value = []
+    resultsTotal.value = 0
+    resultsMore.value = false
+    resultIndex.value = 0
+    resultsError.value = ''
+    resultsAutoLoaded = false
+    streamAttempts = 0
+    Object.keys(liveFrames).forEach((key) => { delete liveFrames[key] })
+    Object.assign(task, { taskRunId: '', mode: startMode, state: 'starting', processed: 0, positive: 0, error: '', cameraErrors: {} })
+    applyStatus(started)
+    if (!task.taskRunId) {
+      ElMessage.warning('后端未返回 taskRunId，任务状态无法跟踪')
+      return
+    }
+    ElMessage.success(`检测任务已启动 · ${modeLabel.value}`)
+    startPolling()
+    openStream()
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, '启动检测失败'))
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function stopDetection() {
+  if (!task.taskRunId) return
+  busy.value = 'stop'
+  try {
+    applyStatus(unwrap(await stopInspection(task.taskRunId), {}))
+    if (isRunning.value) task.state = 'stopping'
+    ElMessage.success('停止指令已下发')
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, '停止检测失败'))
+  } finally {
+    busy.value = ''
+  }
+}
+
+async function loadResults({ append = false } = {}) {
+  if (!task.taskRunId) {
+    ElMessage.warning('请先启动一次检测任务')
+    return
+  }
+  resultsLoading.value = true
+  resultsError.value = ''
+  try {
+    const offset = append ? detections.value.length : 0
+    const page = unwrap(await getDetections(task.taskRunId, { offset, limit: RESULT_PAGE_SIZE }), {})
+    const items = Array.isArray(page) ? page : page.items || []
+    detections.value = append ? [...detections.value, ...items] : items
+    const total = Number(Array.isArray(page) ? items.length : page.total)
+    resultsTotal.value = Number.isFinite(total) ? total : detections.value.length
+    resultsMore.value = detections.value.length < resultsTotal.value
+    if (!append) resultIndex.value = 0
+    if (!append) {
+      if (detections.value.length) ElMessage.success(`已加载 ${detections.value.length} 条检测记录`)
+      else ElMessage.warning('当前任务暂无阳性检测记录')
+    }
+  } catch (error) {
+    resultsError.value = apiErrorMessage(error, '检测结果加载失败')
+    if (!append) detections.value = []
+  } finally {
+    resultsLoading.value = false
+  }
+}
+
+function moveResult(delta) {
+  if (detections.value.length < 2) return
+  resultIndex.value = (resultIndex.value + delta + detections.value.length) % detections.value.length
+}
+
+function selectResult(index) {
+  resultIndex.value = index
+}
+
+function handleKeydown(event) {
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName)) return
+  if (!detections.value.length) return
+  if (event.key === 'ArrowLeft') moveResult(-1)
+  if (event.key === 'ArrowRight') moveResult(1)
+}
+
+function formatTime(value) {
+  if (value === undefined || value === null || value === '') return '—'
+  const date = typeof value === 'number' ? new Date(value < 1e12 ? value * 1000 : value) : new Date(value)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function thumbnailUrl(item) {
+  return getInspectionImageUrl(task.taskRunId, item?.resultImageId || item?.originalImageId)
+}
+
+async function restoreActiveInspection() {
+  const savedCameras = readJson(SELECTED_CAMERAS_KEY)
+  if (Array.isArray(savedCameras)) applyCameraSelection(savedCameras)
+  const saved = readJson(ACTIVE_INSPECTION_KEY)
+  if (!saved?.taskRunId) return
+  restoring.value = true
+  try {
+    applyStatus(unwrap(await getInspectionStatus(saved.taskRunId), {}))
+    if (!task.taskRunId) task.taskRunId = saved.taskRunId
+    if (Array.isArray(saved.cameraIds) && saved.cameraIds.length) applyCameraSelection(saved.cameraIds)
+    if (isRunning.value) {
+      startPolling()
+      openStream()
+    } else {
+      clearActiveInspection()
+    }
+  } catch (error) {
+    clearActiveInspection()
+    if (error?.response?.status !== 404) ElMessage.error(apiErrorMessage(error, '巡检任务状态恢复失败'))
+  } finally {
+    restoring.value = false
+  }
+}
+
+onMounted(() => {
+  loadDeviceStates()
+  loadPlatformInfo()
+  loadRuntimeConfig()
+  restoreActiveInspection()
+  deviceTimer = window.setInterval(loadDeviceStates, DEVICE_STATE_INTERVAL)
+  window.addEventListener('keydown', handleKeydown)
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
+  closeStream()
+  if (deviceTimer) window.clearInterval(deviceTimer)
+  window.removeEventListener('keydown', handleKeydown)
+})
 </script>
 
 <template>
-  <div class="detection-page">
-    <div class="section-heading"><div><span class="eyebrow">01 / INSPECTION</span><h2>智能巡检与检测结果</h2><p>启动一次巡检任务，实时查看摄像头状态和模型识别结果。</p></div><el-tag :type="isDemo ? 'warning' : 'success'" effect="plain">{{ isDemo ? '演示数据' : '接口已连接' }}</el-tag></div>
+  <div class="detection-view">
+    <div class="panel-row">
+      <!-- 01 / INPUTS：参与检测的摄像头与音频、升降输入 -->
+      <el-card class="panel" shadow="never">
+        <template #header>
+          <div class="panel-head">
+            <div class="panel-head__title">
+              <span class="eyebrow">01 / INPUTS</span>
+              <h2>摄像头与音频</h2>
+            </div>
+            <div class="panel-head__meta">
+              <el-tag :type="selectedCameras.length ? 'primary' : 'info'" effect="light" round>
+                {{ selectedCameras.length }} / {{ cameras.length }} 已启用
+              </el-tag>
+            </div>
+          </div>
+        </template>
 
-    <el-card class="config-card" shadow="never">
-      <div class="card-title"><div><span class="eyebrow">CONFIGURATION</span><h3>巡检配置</h3></div><el-tag :type="stateType" effect="light">{{ stateText }}</el-tag></div>
-      <el-form :model="form" label-position="top" class="inspection-form"><el-form-item label="任务运行 ID"><el-input v-model="form.taskRunId" placeholder="inspection-demo-001" :disabled="isRunning" /></el-form-item><el-form-item label="巡检模式"><el-select v-model="form.mode" :disabled="isRunning"><el-option v-for="item in modeOptions" :key="item.value" :label="item.label" :value="item.value" /></el-select></el-form-item><el-form-item label="运行时长（秒）"><el-input-number v-model="form.durationSeconds" :min="0" :max="86400" controls-position="right" /></el-form-item><div class="form-actions"><el-button type="primary" :loading="loading" :disabled="isRunning" @click="beginInspection">▶&nbsp; 开始检测</el-button><el-button type="danger" plain :loading="loading" :disabled="!isRunning" @click="stopCurrentInspection">■&nbsp; 停止</el-button></div></el-form>
+        <div class="camera-grid">
+          <el-tooltip
+            v-for="camera in cameras"
+            :key="camera.id"
+            :content="camera.selected ? '点击取消该摄像头参与检测' : '点击让该摄像头参与本次检测'"
+            placement="top"
+          >
+            <button
+              type="button"
+              class="input-tile"
+              :class="{ 'is-active': camera.selected }"
+              :disabled="isRunning"
+              @click="toggleCamera(camera)"
+            >
+              <span class="input-tile__icon">
+                <el-icon>
+                  <VideoCameraFilled v-if="camera.selected" />
+                  <VideoCamera v-else />
+                </el-icon>
+              </span>
+              <span class="input-tile__body">
+                <strong>{{ camera.label }}</strong>
+                <small>{{ cameraDescription(camera) }}</small>
+              </span>
+              <span class="input-tile__state">{{ camera.selected ? 'ON' : 'OFF' }}</span>
+            </button>
+          </el-tooltip>
+        </div>
+
+        <div class="media-row">
+          <button
+            type="button"
+            class="input-tile"
+            :class="{ 'is-active': Boolean(audio.asset) }"
+            :disabled="audio.capturing"
+            @click="captureAudio"
+          >
+            <span class="input-tile__icon">
+              <el-icon :class="{ 'is-spin': audio.capturing }">
+                <Loading v-if="audio.capturing" />
+                <Microphone v-else />
+              </el-icon>
+            </span>
+            <span class="input-tile__body">
+              <strong>麦克风</strong>
+              <small>{{ audioDescription }}</small>
+            </span>
+            <span class="input-tile__state">{{ audio.capturing ? '采集中' : audio.asset ? '已采集' : '待采集' }}</span>
+          </button>
+
+          <div class="input-tile input-tile--static">
+            <span class="input-tile__icon">
+              <el-icon><Tools /></el-icon>
+            </span>
+            <span class="input-tile__body">
+              <strong>检测升降</strong>
+              <small>通过设备命令调整检测位姿</small>
+            </span>
+            <span class="input-tile__actions">
+              <el-tooltip content="升起检测台" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Top"
+                  :loading="liftBusy === 'up'"
+                  :disabled="Boolean(liftBusy)"
+                  @click="handleLift('up')"
+                />
+              </el-tooltip>
+              <el-tooltip content="下降检测台" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  :icon="Bottom"
+                  :loading="liftBusy === 'down'"
+                  :disabled="Boolean(liftBusy)"
+                  @click="handleLift('down')"
+                />
+              </el-tooltip>
+              <el-tooltip content="停止升降" placement="top">
+                <el-button
+                  circle
+                  size="small"
+                  type="danger"
+                  :icon="VideoPause"
+                  :loading="liftBusy === 'stop'"
+                  :disabled="Boolean(liftBusy)"
+                  @click="handleLift('stop')"
+                />
+              </el-tooltip>
+            </span>
+          </div>
+        </div>
+      </el-card>
+
+      <!-- 02 / CONFIGURATION：运行环境、模型与本次检测参数 -->
+      <el-card class="panel" shadow="never">
+        <template #header>
+          <div class="panel-head">
+            <div class="panel-head__title">
+              <span class="eyebrow">02 / CONFIGURATION</span>
+              <h2>运行配置</h2>
+            </div>
+            <div class="panel-head__meta">
+              <el-button
+                text
+                circle
+                :icon="Refresh"
+                :loading="runtimeLoading"
+                title="重新读取运行配置"
+                @click="loadRuntimeConfig"
+              />
+            </div>
+          </div>
+        </template>
+
+        <el-form label-position="top" class="config-form">
+          <el-form-item label="虚拟环境">
+            <el-select
+              v-model="form.environment"
+              class="config-control"
+              :disabled="isRunning || !runtime.environments.length"
+              :loading="runtimeLoading"
+              :placeholder="environmentPlaceholder"
+            >
+              <el-option
+                v-for="item in runtime.environments"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+            <p class="field-hint">{{ environmentHint }}</p>
+            <p v-if="platformHint" class="field-hint">平台：{{ platformHint }}</p>
+          </el-form-item>
+
+          <el-form-item label="模型权重">
+            <el-input class="config-control" :model-value="runtime.modelPath" readonly placeholder="后端未返回模型权重路径">
+              <template #suffix><el-icon><FolderOpened /></el-icon></template>
+            </el-input>
+          </el-form-item>
+
+          <el-form-item label="配置文件">
+            <el-input class="config-control" :model-value="runtime.configPath" readonly placeholder="后端未返回配置文件路径">
+              <template #suffix><el-icon><FolderOpened /></el-icon></template>
+            </el-input>
+          </el-form-item>
+
+          <el-form-item label="结果保存目录">
+            <el-input class="config-control" :model-value="runtime.resultPath" readonly placeholder="后端未返回结果目录">
+              <template #suffix><el-icon><FolderOpened /></el-icon></template>
+            </el-input>
+            <p class="field-hint">结果图由巡检服务登记后通过证据图片接口提供</p>
+          </el-form-item>
+
+          <el-form-item label="运行时长（秒）">
+            <el-input-number
+              v-model="form.durationSeconds"
+              :min="0"
+              :step="1"
+              :disabled="isRunning"
+            />
+            <p class="field-hint">0 表示持续运行，直到手动停止</p>
+          </el-form-item>
+
+          <div class="config-actions">
+            <el-button
+              type="primary"
+              size="large"
+              class="config-actions__primary"
+              :icon="VideoPlay"
+              :loading="busy === 'start'"
+              :disabled="isRunning || restoring || !selectedCameras.length"
+              @click="startDetection"
+            >
+              {{ restoring ? '恢复任务中…' : '开始检测' }}
+            </el-button>
+            <el-button
+              type="danger"
+              size="large"
+              :icon="VideoPause"
+              :loading="busy === 'stop'"
+              :disabled="!isRunning"
+              @click="stopDetection"
+            >
+              停止
+            </el-button>
+          </div>
+        </el-form>
+      </el-card>
+    </div>
+
+    <!-- 03 / RESULTS：任务统计、标注图预览和阳性检测记录 -->
+    <el-card class="panel" shadow="never">
+      <template #header>
+        <div class="panel-head">
+          <div class="panel-head__title">
+            <span class="eyebrow">03 / RESULTS</span>
+            <h2>检测结果</h2>
+          </div>
+          <div class="panel-head__meta">
+            <div v-if="task.taskRunId" class="task-summary">
+              <el-tag :type="stateTag" effect="light" size="small">{{ stateLabel }}</el-tag>
+              <span>{{ modeLabel }} · {{ task.processed }} 帧 · {{ task.positive }} 阳性帧</span>
+              <el-tag type="info" effect="plain" size="small">{{ task.taskRunId }}</el-tag>
+            </div>
+            <el-button
+              :icon="Picture"
+              :loading="resultsLoading"
+              :disabled="!task.taskRunId"
+              @click="loadResults()"
+            >
+              加载结果图
+            </el-button>
+          </div>
+        </div>
+      </template>
+
+      <el-alert
+        v-if="task.error"
+        class="results-alert"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="`巡检任务失败：${task.error}`"
+      />
+      <el-alert
+        v-if="cameraErrorList.length"
+        class="results-alert"
+        type="warning"
+        show-icon
+        :closable="false"
+        :title="`通道异常：${cameraErrorList.join('；')}`"
+      />
+      <el-alert
+        v-if="resultsError"
+        class="results-alert"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="resultsError"
+      />
+
+      <div class="results-layout">
+        <div class="result-preview">
+          <el-image
+            v-if="previewSrc"
+            class="result-preview__image"
+            :src="previewSrc"
+            fit="contain"
+            :preview-src-list="previewList"
+            :initial-index="0"
+            hide-on-click-modal
+          >
+            <template #error>
+              <el-empty description="证据图片读取失败" :image-size="72" />
+            </template>
+          </el-image>
+          <el-empty v-else :image-size="96" :description="previewEmptyText" />
+
+          <div v-if="detections.length > 1" class="result-preview__nav">
+            <el-button circle size="small" :icon="ArrowLeft" title="上一条" @click="moveResult(-1)" />
+            <span>{{ resultIndex + 1 }} / {{ detections.length }}</span>
+            <el-button circle size="small" :icon="ArrowRight" title="下一条" @click="moveResult(1)" />
+          </div>
+        </div>
+
+        <div class="result-detail">
+          <el-descriptions v-if="currentResult" :column="1" border size="small">
+            <el-descriptions-item label="摄像头">{{ currentResult.cameraId || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="帧编号">{{ currentResult.frameId ?? '—' }}</el-descriptions-item>
+            <el-descriptions-item label="检测时间">{{ formatTime(currentResult.capturedAt) }}</el-descriptions-item>
+            <el-descriptions-item label="推理耗时">
+              {{ currentResult.latencyMs != null ? `${currentResult.latencyMs} ms` : '—' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="检出目标">
+              <template v-if="currentLabels.length">
+                <el-tag
+                  v-for="label in currentLabels"
+                  :key="label"
+                  class="label-tag"
+                  type="danger"
+                  effect="light"
+                  size="small"
+                >
+                  {{ label }}
+                </el-tag>
+              </template>
+              <span v-else>—</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="标注图编号">{{ currentResult.resultImageId || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="原图编号">{{ currentResult.originalImageId || '—' }}</el-descriptions-item>
+          </el-descriptions>
+          <el-empty v-else :image-size="72" description="结果记录将在巡检服务返回后显示" />
+        </div>
+      </div>
+
+      <div v-if="detections.length" class="result-strip">
+        <el-scrollbar>
+          <div class="result-strip__track">
+            <button
+              v-for="(item, index) in detections"
+              :key="item.detectionId || `${item.cameraId}-${item.frameId}-${index}`"
+              type="button"
+              class="result-thumb"
+              :class="{ 'is-active': index === resultIndex }"
+              @click="selectResult(index)"
+            >
+              <img
+                v-if="thumbnailUrl(item)"
+                class="result-thumb__image"
+                :src="thumbnailUrl(item)"
+                :alt="`结果图 ${index + 1}`"
+                loading="lazy"
+              />
+              <span v-else class="result-thumb__image result-thumb__image--empty">
+                <el-icon><Picture /></el-icon>
+              </span>
+              <span class="result-thumb__meta">
+                <strong>{{ item.cameraId || '—' }}</strong>
+                <small>#{{ item.frameId ?? '—' }}</small>
+              </span>
+            </button>
+          </div>
+        </el-scrollbar>
+        <div v-if="resultsMore" class="result-strip__more">
+          <el-button text type="primary" :loading="resultsLoading" @click="loadResults({ append: true })">
+            加载更多（已显示 {{ detections.length }} / {{ resultsTotal }} 条）
+          </el-button>
+        </div>
+      </div>
     </el-card>
-
-    <div class="stats-grid"><div class="stat-card"><span>任务状态</span><strong>{{ stateText }}</strong><small>{{ form.taskRunId }}</small></div><div class="stat-card"><span>已处理帧数</span><strong>{{ status.processed.toLocaleString() }}</strong><small>Processed frames</small></div><div class="stat-card"><span>检测阳性</span><strong class="accent">{{ status.positive }}</strong><small>Positive events</small></div><div class="stat-card"><span>阳性率</span><strong>{{ positiveRate }}</strong><small>{{ currentMode.label }}</small></div></div>
-
-    <div class="workspace-grid"><el-card class="camera-card" shadow="never"><div class="card-title compact"><div><span class="eyebrow">INPUTS / {{ activeCameras.length }} CAMERAS</span><h3>摄像头画面</h3></div><el-button text @click="refreshStatus(true)">↻ 刷新</el-button></div><div class="video-preview"><div class="scan-line"></div><span class="video-symbol">◉</span><strong>实时视频流</strong><small>{{ isRunning ? '正在接收检测画面' : '等待巡检任务启动' }}</small></div><div class="camera-grid"><div v-for="camera in cameras" :key="camera.id" class="camera-tile" :class="{ active: activeCameras.some((item) => item.id === camera.id) }"><span class="camera-icon">⌁</span><div><strong>{{ camera.name }}</strong><small>{{ activeCameras.some((item) => item.id === camera.id) ? '已启用' : '待机' }}</small></div><em>{{ activeCameras.some((item) => item.id === camera.id) ? 'ON' : 'OFF' }}</em></div></div></el-card>
-
-      <el-card class="results-card" shadow="never"><div class="card-title compact"><div><span class="eyebrow">RESULTS / {{ detections.length }}</span><h3>检测结果</h3></div><el-button type="primary" plain :loading="resultsLoading" @click="refreshDetections(true)">加载结果</el-button></div><div v-if="selectedDetection" class="result-focus"><div class="result-image"><img v-if="imageUrl" :src="imageUrl" alt="检测证据" /><div v-else><span>▧</span><small>证据图片预览</small></div></div><div class="result-focus-info"><el-tag type="danger" effect="light">{{ labelOf(selectedDetection) }}</el-tag><strong>{{ selectedDetection.cameraId }} · #{{ selectedDetection.frameId }}</strong><span>置信度 {{ Math.round((selectedDetection.detections?.[0]?.confidence || 0) * 100) || '--' }}%</span></div></div><el-empty v-else description="暂无检测结果" :image-size="70" /><div class="result-list"><button v-for="item in detections" :key="item.detectionId" class="result-row" :class="{ selected: selectedDetection?.detectionId === item.detectionId }" @click="selectDetection(item)"><div><strong>{{ labelOf(item) }}</strong><small>{{ item.cameraId }} · {{ formatTime(item.capturedAt) }}</small></div><span>{{ item.latencyMs ?? '--' }} ms</span></button></div></el-card></div>
   </div>
 </template>
 
 <style scoped>
-.detection-page { max-width: 1500px; margin:0 auto; }.section-heading,.card-title { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }.section-heading { margin-bottom:22px; }.eyebrow { color:#409eff; font-size:10px; font-weight:800; letter-spacing:1.7px; }.section-heading h2 { margin:6px 0 3px; font-size:26px; }.section-heading p { margin:0; color:var(--muted); font-size:13px; }.card-title h3 { margin:5px 0 0; font-size:18px; }.config-card,.camera-card,.results-card { border:1px solid var(--line); border-radius:12px; }.config-card :deep(.el-card__body),.camera-card :deep(.el-card__body),.results-card :deep(.el-card__body) { padding:22px; }.inspection-form { display:grid; grid-template-columns:1.35fr 1fr 1fr auto; gap:18px; align-items:end; margin-top:18px; }.inspection-form :deep(.el-form-item) { margin-bottom:0; }.form-actions { display:flex; gap:9px; padding-bottom:1px; }.form-actions .el-button { height:40px; margin:0; }.stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:16px 0; }.stat-card { padding:17px 19px; border:1px solid var(--line); border-radius:11px; background:var(--panel); }.stat-card span,.stat-card small { display:block; color:var(--muted); font-size:11px; }.stat-card strong { display:block; margin:6px 0 1px; font-size:24px; }.stat-card strong.accent { color:var(--primary); }.workspace-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(320px,.8fr); gap:16px; }.compact { align-items:center; }.video-preview { position:relative; height:250px; display:flex; flex-direction:column; align-items:center; justify-content:center; overflow:hidden; border-radius:9px; background:linear-gradient(145deg,#f5f7fa,#eef1f6); color:#606266; }.video-preview strong { margin-top:9px; font-size:22px; letter-spacing:1px; }.video-preview small { color:#909399; font-size:11px; }.video-symbol { display:grid; place-items:center; width:52px; height:52px; border:1px solid #a0cfff; border-radius:50%; color:#409eff; font-size:24px; }.scan-line { position:absolute; left:0; right:0; top:48%; height:1px; background:linear-gradient(90deg,transparent,#409eff,transparent); opacity:.45; }.camera-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:9px; margin-top:12px; }.camera-tile { display:flex; align-items:center; gap:8px; min-width:0; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fafcfb; }.camera-tile.active { border-color:#b3d8ff; background:#ecf5ff; }.camera-icon { display:grid; place-items:center; width:27px; height:27px; flex:none; border-radius:6px; background:#ecf5ff; color:#409eff; font-size:17px; }.camera-tile strong,.camera-tile small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.camera-tile strong { font-size:11px; }.camera-tile small { margin-top:2px; color:var(--muted); font-size:10px; }.camera-tile em { margin-left:auto; color:#909399; font-size:9px; font-style:normal; }.result-focus { display:flex; gap:12px; margin:18px 0 13px; padding:10px; border-radius:9px; background:#f5f7fa; }.result-image { width:115px; height:90px; flex:none; display:grid; place-items:center; overflow:hidden; border-radius:6px; background:#e4e7ed; color:#909399; }.result-image img { width:100%; height:100%; object-fit:cover; }.result-image div { text-align:center; }.result-image span { display:block; font-size:26px; }.result-image small { font-size:10px; }.result-focus-info { display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:5px 0; }.result-focus-info strong { font-size:12px; }.result-focus-info span { color:var(--muted); font-size:11px; }.result-list { display:flex; flex-direction:column; gap:7px; max-height:292px; overflow:auto; }.result-row { display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; padding:10px 11px; border:1px solid transparent; border-radius:8px; background:#f5f7fa; color:var(--ink); text-align:left; cursor:pointer; }.result-row:hover,.result-row.selected { border-color:#b3d8ff; background:#ecf5ff; }.result-row strong,.result-row small { display:block; }.result-row strong { font-size:12px; }.result-row small { margin-top:3px; color:var(--muted); font-size:10px; }.result-row>span { color:var(--muted); font-size:10px; white-space:nowrap; }
-@media (max-width:1100px) { .inspection-form { grid-template-columns:repeat(2,1fr); }.form-actions { grid-column:1/-1; }.workspace-grid { grid-template-columns:1fr; } }
-@media (max-width:650px) { .section-heading h2 { font-size:22px; }.stats-grid { grid-template-columns:repeat(2,1fr); }.inspection-form { grid-template-columns:1fr; }.camera-grid { grid-template-columns:repeat(2,1fr); }.form-actions { grid-column:auto; }.header-meta { display:none; } }
-</style>
+.detection-view {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
 
+.panel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.panel :deep(.el-card__header) {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.panel :deep(.el-card__body) {
+  padding: 20px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.panel-head__title h2 {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  letter-spacing: 0;
+}
+
+.eyebrow {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  color: var(--el-text-color-secondary);
+}
+
+.panel-head__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.task-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.input-tile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .2s, background-color .2s, color .2s;
+}
+
+.input-tile:hover:not(:disabled) {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+
+.input-tile:focus-visible {
+  outline: 2px solid var(--el-color-primary-light-5);
+  outline-offset: 1px;
+}
+
+.input-tile.is-active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+
+.input-tile:disabled {
+  cursor: not-allowed;
+  opacity: .6;
+}
+
+.input-tile--static {
+  cursor: default;
+}
+
+.input-tile--static:hover {
+  border-color: var(--el-border-color);
+  color: var(--el-text-color-regular);
+}
+
+.input-tile__icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+  font-size: 17px;
+}
+
+.input-tile.is-active .input-tile__icon {
+  background: var(--el-color-primary-light-8);
+  color: var(--el-color-primary);
+}
+
+.input-tile__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.input-tile__body strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+
+.input-tile.is-active .input-tile__body strong {
+  color: var(--el-color-primary);
+}
+
+.input-tile__body small {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.input-tile__state {
+  flex: 0 0 auto;
+  color: var(--el-text-color-placeholder);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.input-tile.is-active .input-tile__state {
+  color: var(--el-color-primary);
+}
+
+.input-tile__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.media-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.config-form :deep(.el-form-item) {
+  margin-bottom: 16px;
+}
+
+.config-form :deep(.el-form-item__label) {
+  padding-bottom: 4px;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.config-form :deep(.el-form-item__content) {
+  display: block;
+  line-height: 1.5;
+}
+
+.config-control {
+  width: 100%;
+}
+
+.field-hint {
+  margin-top: 4px;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.config-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.config-actions__primary {
+  flex: 1;
+}
+
+.results-alert {
+  margin-bottom: 16px;
+}
+
+.results-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+.result-preview {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  padding: 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-lighter);
+}
+
+.result-preview__image {
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+}
+
+.result-preview__nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.result-detail {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--el-border-radius-base);
+}
+
+.result-detail :deep(.el-descriptions__label) {
+  width: 92px;
+  color: var(--el-text-color-secondary);
+}
+
+.result-detail :deep(.el-descriptions__content) {
+  word-break: break-all;
+}
+
+.label-tag + .label-tag {
+  margin-left: 6px;
+}
+
+.result-strip {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.result-strip__track {
+  display: flex;
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
+.result-thumb {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 132px;
+  flex: 0 0 132px;
+  padding: 6px;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .2s, box-shadow .2s;
+}
+
+.result-thumb:hover {
+  border-color: var(--el-color-primary-light-5);
+}
+
+.result-thumb.is-active {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-8);
+}
+
+.result-thumb__image {
+  width: 100%;
+  height: 74px;
+  object-fit: cover;
+  border-radius: 2px;
+  background: var(--el-fill-color-light);
+}
+
+.result-thumb__image--empty {
+  display: grid;
+  place-items: center;
+  color: var(--el-text-color-placeholder);
+  font-size: 20px;
+}
+
+.result-thumb__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.result-thumb__meta strong {
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+}
+
+.result-thumb__meta small {
+  color: var(--el-text-color-secondary);
+}
+
+.result-strip__more {
+  margin-top: 6px;
+  text-align: center;
+}
+
+.is-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1200px) {
+  .panel-row,
+  .results-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .camera-grid,
+  .media-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+</style>
