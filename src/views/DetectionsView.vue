@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   ArrowLeft, ArrowRight, Bottom, FolderOpened, Loading, Microphone, Picture, Refresh, Tools, Top,
@@ -37,6 +37,16 @@ const TERMINAL_STATES = ['completed', 'stopped', 'failed']
 const HEALTH_LABELS = { ok: '正常', healthy: '正常', degraded: '降级', warning: '告警', error: '故障', unavailable: '不可用' }
 const QUALITY_LABELS = { valid: '有效', invalid: '无效', uncertain: '不确定', degraded: '降级' }
 
+// ① 单路 / ② 四路 / ③ 八路：通道数同时决定后端 mode 与结果区的排版。
+// 单路显示一张大画面加检测详情，四路和八路按多画面网格平铺，八路每帧 30 fps 也不做裁剪。
+const SINGLE_LAYOUT = { id: 'single', label: '单路', count: 1, mode: 'single' }
+const CAMERA_LAYOUTS = [
+  SINGLE_LAYOUT,
+  { id: 'four', label: '四路', count: 4, mode: 'four' },
+  { id: 'eight', label: '八路', count: 8, mode: 'eight' }
+]
+const LAYOUT_BY_MODE = { single: SINGLE_LAYOUT, four: CAMERA_LAYOUTS[1], eight: CAMERA_LAYOUTS[2] }
+
 // 八路巡检通道是机器人固定的设备拓扑，通道状态一律以后端设备接口为准。
 const CAMERA_CHANNELS = Array.from({ length: 8 }, (_, index) => {
   const code = String(index + 1).padStart(2, '0')
@@ -44,6 +54,7 @@ const CAMERA_CHANNELS = Array.from({ length: 8 }, (_, index) => {
 })
 const ACTIVE_INSPECTION_KEY = 'inspection-robot.active-inspection'
 const SELECTED_CAMERAS_KEY = 'inspection-robot.selected-cameras'
+const LAYOUT_KEY = 'inspection-robot.detection-layout'
 const AUDIO_PARAMETERS = { sample_rate: 16000, channels: 1, duration_seconds: 3 }
 const POLL_INTERVAL = 2500
 const DEVICE_STATE_INTERVAL = 15000
@@ -72,7 +83,8 @@ const task = reactive({
   startedAt: null,
   finishedAt: null,
   error: '',
-  cameraErrors: {}
+  cameraErrors: {},
+  cameraIds: []
 })
 
 const detections = ref([])
@@ -84,6 +96,9 @@ const resultsError = ref('')
 const liveFrames = reactive({})
 const busy = ref('')
 const restoring = ref(false)
+
+// 结果区当前排版，决定显示单路大画面还是四路 / 八路网格。
+const layoutView = ref(SINGLE_LAYOUT.id)
 
 let pollTimer = null
 let deviceTimer = null
@@ -99,6 +114,9 @@ const isRunning = computed(() => ['starting', 'running', 'stopping'].includes(ta
 const stateLabel = computed(() => STATE_LABELS[task.state] || task.state || STATE_LABELS.idle)
 const stateTag = computed(() => STATE_TAGS[task.state] || 'info')
 const cameraErrorList = computed(() => Object.entries(task.cameraErrors || {}).map(([id, message]) => `${id}: ${message}`))
+// 结果区排版只由页面选择决定；任务启动和刷新恢复时会把排版对齐到任务的 mode。
+const activeLayout = computed(() => CAMERA_LAYOUTS.find((item) => item.id === layoutView.value) || SINGLE_LAYOUT)
+const cameraCountHint = computed(() => (selectedCameras.value.length ? `${selectedCameras.value.length} 路已选` : '未选择通道'))
 
 const environmentPlaceholder = computed(() => {
   if (runtimeLoading.value) return '读取中…'
@@ -124,6 +142,7 @@ const audioDescription = computed(() => {
 
 const currentResult = computed(() => detections.value[resultIndex.value] || null)
 const currentResultImageUrl = computed(() => getInspectionImageUrl(task.taskRunId, currentResult.value?.resultImageId))
+// 单路画面优先播放实时标注帧，没有实时帧时回落到当前记录的标注图。
 const currentLiveFrame = computed(() => {
   const cameraId = currentResult.value?.cameraId
   if (cameraId && liveFrames[cameraId]) return liveFrames[cameraId]
@@ -135,10 +154,11 @@ const previewList = computed(() => (previewSrc.value ? [previewSrc.value] : []))
 const previewEmptyText = computed(() => {
   if (resultsLoading.value) return '结果加载中…'
   if (detections.value.length) return '当前检测记录没有返回标注图'
-  return '暂无检测结果图，启动检测后点击「加载结果图」'
+  return isRunning.value ? '等待该通道回传标注帧…' : '暂无检测结果图，启动检测后点击「加载结果图」'
 })
-const currentLabels = computed(() => {
-  const result = currentResult.value
+const currentLabels = computed(() => resultLabels(currentResult.value))
+
+function resultLabels(result) {
   if (!result) return []
   if (result.countByLabel && typeof result.countByLabel === 'object') {
     return Object.entries(result.countByLabel).map(([label, count]) => `${label} × ${count}`)
@@ -147,7 +167,87 @@ const currentLabels = computed(() => {
     return result.detections.map((item) => item?.label || item?.className || item?.class).filter(Boolean)
   }
   return []
-})
+}
+
+function resultTime(result) {
+  const value = result?.capturedAt
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function resultSummary(result) {
+  if (!result) return '无检测记录'
+  const labels = resultLabels(result)
+  if (labels.length) return labels.join(' · ')
+  if (Array.isArray(result.detections) && result.detections.length) return `${result.detections.length} 个目标`
+  return '无阳性目标'
+}
+
+function thumbnailUrl(item) {
+  return getInspectionImageUrl(task.taskRunId, item?.resultImageId || item?.originalImageId)
+}
+
+// 多路网格的排版顺序：运行中先按任务下发的 cameraIds，再补上页面里随后勾选的通道。
+function layoutCameraIds() {
+  const ids = []
+  const seen = new Set()
+  const push = (id) => {
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    ids.push(id)
+  }
+  if (Array.isArray(task.cameraIds)) task.cameraIds.forEach(push)
+  selectedCameras.value.forEach((camera) => push(camera.id))
+  return ids
+}
+
+// 单路只播放当前选中通道，多路按被选中的通道数平铺。
+function layoutCameraIdsFor(layout) {
+  const ids = layoutCameraIds()
+  if (layout?.id !== SINGLE_LAYOUT.id) return ids
+  return ids.slice(0, 1)
+}
+
+// 每个通道一张卡片：实时帧优先，其次是该通道最近一条检测记录，都没有时显示占位。
+const cameraCards = computed(() => layoutCameraIdsFor(activeLayout.value).map((cameraId) => {
+  const channel = cameras.find((camera) => camera.id === cameraId)
+  const records = []
+  for (let index = detections.value.length - 1; index >= 0; index -= 1) {
+    if (detections.value[index]?.cameraId === cameraId) records.push(detections.value[index])
+  }
+  const latest = records[0] || null
+  const liveFrame = liveFrames[cameraId] || ''
+  const liveFrameId = liveFrames[`${cameraId}::frameId`]
+  const fallbackUrl = thumbnailUrl(latest)
+  const detectionCount = records.length
+  return {
+    cameraId,
+    cameraLabel: channel?.label || cameraId,
+    selected: Boolean(channel?.selected),
+    liveFrame,
+    liveFrameId: Number.isFinite(liveFrameId) ? liveFrameId : null,
+    latest,
+    detectionCount,
+    displayIndex: latest ? resultIndexOf(latest) : -1,
+    summary: resultSummary(latest),
+    frameId: liveFrameId ?? latest?.frameId ?? null,
+    time: latest ? resultTime(latest) : '—',
+    src: liveFrame || fallbackUrl,
+    emptyText: liveFrame
+      ? ''
+      : latest
+        ? '该记录未返回标注图'
+        : isRunning.value
+          ? '等待该通道回传标注帧…'
+          : '暂无检测结果'
+  }
+}))
+
+function resultIndexOf(target) {
+  const index = detections.value.indexOf(target)
+  return index >= 0 ? index : -1
+}
 
 // 设备状态：一次 robot/state 覆盖全部通道，避免 8 次单独请求。
 function normalizeDeviceStates(payload) {
@@ -275,17 +375,55 @@ function persistCameraSelection() {
   window.localStorage.setItem(SELECTED_CAMERAS_KEY, JSON.stringify(selectedCameras.value.map((camera) => camera.id)))
 }
 
+function persistLayout(id) {
+  window.localStorage.setItem(LAYOUT_KEY, id)
+}
+
+// 切换 1 / 4 / 8 路排版时同步勾选对应数量的通道，避免排版和实际参与检测的通道不一致。
+function selectLayout(layout) {
+  if (isRunning.value) {
+    ElMessage.warning('检测进行中，请先停止任务再切换 1 / 4 / 8 路显示')
+    return
+  }
+  const target = CAMERA_LAYOUTS.find((item) => item.id === layout)
+  if (!target) return
+  layoutView.value = target.id
+  persistLayout(target.id)
+  const ids = CAMERA_CHANNELS.slice(0, target.count).map((channel) => channel.id)
+  const changed = ids.filter((id) => !cameras.find((camera) => camera.id === id)?.selected).length
+  applyCameraSelection(ids)
+  persistCameraSelection()
+  setResultIndexForCamera(ids[0])
+  resetCameraResults()
+  if (changed) ElMessage.info(`已自动勾选前 ${target.count} 路通道，可按需调整`)
+}
+
+// 用户手动勾选后，选中的通道数决定后端 mode；4 / 8 路会切换对应的网格排版。
+watch(() => selectedCameras.value.length, (count) => {
+  if (isRunning.value) return
+  const layout = CAMERA_LAYOUTS.find((item) => item.count === count)
+  if (!layout || layout.id === layoutView.value) return
+  layoutView.value = layout.id
+  persistLayout(layout.id)
+})
+
 function persistActiveInspection() {
   if (!task.taskRunId) return
   window.localStorage.setItem(ACTIVE_INSPECTION_KEY, JSON.stringify({
     taskRunId: task.taskRunId,
     mode: task.mode,
-    cameraIds: selectedCameras.value.map((camera) => camera.id)
+    cameraIds: layoutCameraIds()
   }))
 }
 
 function clearActiveInspection() {
   window.localStorage.removeItem(ACTIVE_INSPECTION_KEY)
+}
+
+// 切换排版后清理上一次的帧缓存，避免把别的任务的画面当成当前画面。
+function resetCameraResults() {
+  Object.keys(liveFrames).forEach((key) => { delete liveFrames[key] })
+  resultIndex.value = 0
 }
 
 function toggleCamera(camera) {
@@ -295,6 +433,7 @@ function toggleCamera(camera) {
   }
   camera.selected = !camera.selected
   persistCameraSelection()
+  if (camera.selected) setResultIndexForCamera(camera.id)
 }
 
 async function captureAudio() {
@@ -334,7 +473,7 @@ async function handleLift(action) {
 
 function applyStatus(status) {
   if (!status || typeof status !== 'object') return
-  ;['taskRunId', 'mode', 'state', 'processed', 'positive', 'startedAt', 'finishedAt', 'error', 'cameraErrors'].forEach((key) => {
+  ;['taskRunId', 'mode', 'state', 'processed', 'positive', 'startedAt', 'finishedAt', 'error', 'cameraErrors', 'cameraIds'].forEach((key) => {
     if (status[key] !== undefined && status[key] !== null) task[key] = status[key]
   })
   if (isRunning.value) {
@@ -418,6 +557,14 @@ function closeStream() {
   }
 }
 
+// 写入某一通道的实时帧；帧号单独存一份，卡片标题上用来区分实时帧和历史记录。
+function applyLiveFrame(cameraId, frame) {
+  if (!cameraId || !frame?.available || !frame.jpegBase64) return
+  liveFrames[cameraId] = `data:image/jpeg;base64,${frame.jpegBase64}`
+  const frameId = Number(frame.frameId)
+  if (Number.isFinite(frameId)) liveFrames[`${cameraId}::frameId`] = frameId
+}
+
 function handleStreamMessage(event) {
   let payload
   try {
@@ -433,19 +580,14 @@ function handleStreamMessage(event) {
     resultsMore.value = detections.value.length < resultsTotal.value
     resultIndex.value = 0
   }
+  // 多路负载：data.frames.frames 是 worker 返回的每通道最新帧。
   const frames = data.frames?.frames || data.frames
   if (frames && typeof frames === 'object' && !Array.isArray(frames)) {
-    Object.entries(frames).forEach(([cameraId, frame]) => {
-      if (frame?.available && frame.jpegBase64) {
-        liveFrames[frame.cameraId || cameraId] = `data:image/jpeg;base64,${frame.jpegBase64}`
-      }
-    })
+    Object.entries(frames).forEach(([cameraId, frame]) => applyLiveFrame(frame?.cameraId || cameraId, frame))
     return
   }
   const frame = data.frame
-  if (frame?.available && frame.jpegBase64) {
-    liveFrames[frame.cameraId || 'cam01'] = `data:image/jpeg;base64,${frame.jpegBase64}`
-  }
+  if (frame?.available && frame.jpegBase64) applyLiveFrame(frame.cameraId || 'cam01', frame)
 }
 
 async function startDetection() {
@@ -470,7 +612,9 @@ async function startDetection() {
     resultsAutoLoaded = false
     streamAttempts = 0
     Object.keys(liveFrames).forEach((key) => { delete liveFrames[key] })
-    Object.assign(task, { taskRunId: '', mode: startMode, state: 'starting', processed: 0, positive: 0, error: '', cameraErrors: {} })
+    Object.assign(task, { taskRunId: '', mode: startMode, state: 'starting', processed: 0, positive: 0, error: '', cameraErrors: {}, cameraIds })
+    layoutView.value = LAYOUT_BY_MODE[startMode].id
+    persistLayout(layoutView.value)
     applyStatus(started)
     if (!task.taskRunId) {
       ElMessage.warning('后端未返回 taskRunId，任务状态无法跟踪')
@@ -537,6 +681,18 @@ function selectResult(index) {
   resultIndex.value = index
 }
 
+// 单路模式下切到某通道的最近一条记录；没有记录时回到第一条。
+function setResultIndexForCamera(cameraId) {
+  const index = detections.value.findIndex((item) => item.cameraId === cameraId)
+  resultIndex.value = index >= 0 ? index : 0
+}
+
+// 卡片的「查看详情」：多路网格里把该通道最近一条记录提到详情区。
+function focusCardResult(card) {
+  if (card.displayIndex < 0) return
+  resultIndex.value = card.displayIndex
+}
+
 function handleKeydown(event) {
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target?.tagName)) return
   if (!detections.value.length) return
@@ -550,20 +706,21 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
 }
 
-function thumbnailUrl(item) {
-  return getInspectionImageUrl(task.taskRunId, item?.resultImageId || item?.originalImageId)
-}
-
 async function restoreActiveInspection() {
+  const savedLayout = window.localStorage.getItem(LAYOUT_KEY)
   const savedCameras = readJson(SELECTED_CAMERAS_KEY)
   if (Array.isArray(savedCameras)) applyCameraSelection(savedCameras)
   const saved = readJson(ACTIVE_INSPECTION_KEY)
-  if (!saved?.taskRunId) return
+  if (!saved?.taskRunId) {
+    if (CAMERA_LAYOUTS.some((item) => item.id === savedLayout)) layoutView.value = savedLayout
+    return
+  }
   restoring.value = true
   try {
     applyStatus(unwrap(await getInspectionStatus(saved.taskRunId), {}))
     if (!task.taskRunId) task.taskRunId = saved.taskRunId
     if (Array.isArray(saved.cameraIds) && saved.cameraIds.length) applyCameraSelection(saved.cameraIds)
+    layoutView.value = (LAYOUT_BY_MODE[task.mode] || CAMERA_LAYOUTS.find((item) => item.id === savedLayout) || SINGLE_LAYOUT).id
     if (isRunning.value) {
       startPolling()
       openStream()
@@ -709,7 +866,7 @@ onBeforeUnmount(() => {
         </div>
       </el-card>
 
-      <!-- 02 / CONFIGURATION：运行环境、模型与本次检测参数 -->
+      <!-- 02 / CONFIGURATION：运行环境、模型与 1 / 4 / 8 路显示方式 -->
       <el-card class="panel" shadow="never">
         <template #header>
           <div class="panel-head">
@@ -731,6 +888,27 @@ onBeforeUnmount(() => {
         </template>
 
         <el-form label-position="top" class="config-form">
+          <el-form-item label="显示方式">
+            <el-radio-group
+              v-model="layoutView"
+              class="layout-switch"
+              :disabled="isRunning"
+              @change="selectLayout"
+            >
+              <el-radio-button
+                v-for="item in CAMERA_LAYOUTS"
+                :key="item.id"
+                :value="item.id"
+              >
+                {{ item.label }} · {{ item.count }} 路
+              </el-radio-button>
+            </el-radio-group>
+            <p class="field-hint">切换显示方式会同步勾选前 {{ activeLayout.count }} 路通道；检测进行中不可切换</p>
+            <p v-if="isRunning" class="field-hint">
+              当前任务为 {{ modeLabel }}（{{ activeLayout.label }} 显示）
+            </p>
+          </el-form-item>
+
           <el-form-item label="虚拟环境">
             <el-select
               v-model="form.environment"
@@ -806,7 +984,7 @@ onBeforeUnmount(() => {
       </el-card>
     </div>
 
-    <!-- 03 / RESULTS：任务统计、标注图预览和阳性检测记录 -->
+    <!-- 03 / RESULTS：单路大画面、四路 / 八路网格、阳性记录详情 -->
     <el-card class="panel" shadow="never">
       <template #header>
         <div class="panel-head">
@@ -815,6 +993,7 @@ onBeforeUnmount(() => {
             <h2>检测结果</h2>
           </div>
           <div class="panel-head__meta">
+            <el-tag type="info" effect="plain" size="small">{{ activeLayout.label }} · {{ cameraCountHint }}</el-tag>
             <div v-if="task.taskRunId" class="task-summary">
               <el-tag :type="stateTag" effect="light" size="small">{{ stateLabel }}</el-tag>
               <span>{{ modeLabel }} · {{ task.processed }} 帧 · {{ task.positive }} 阳性帧</span>
@@ -857,7 +1036,8 @@ onBeforeUnmount(() => {
         :title="resultsError"
       />
 
-      <div class="results-layout">
+      <!-- 单路：一张大画面加当前记录的完整检测信息 -->
+      <div v-if="activeLayout.id === 'single'" class="results-layout">
         <div class="result-preview">
           <el-image
             v-if="previewSrc"
@@ -909,6 +1089,69 @@ onBeforeUnmount(() => {
           </el-descriptions>
           <el-empty v-else :image-size="72" description="结果记录将在巡检服务返回后显示" />
         </div>
+      </div>
+
+      <!-- 四路 / 八路：每路一张卡片，实时帧优先，回落最近一条标注图 -->
+      <div v-else class="camera-view-grid" :class="`camera-view-grid--${activeLayout.id}`">
+        <article
+          v-for="card in cameraCards"
+          :key="card.cameraId"
+          class="camera-view-card"
+          :class="{ 'is-live': Boolean(card.liveFrame) }"
+        >
+          <div class="camera-view-card__head">
+            <div class="camera-view-card__title">
+              <strong>{{ card.cameraId }}</strong>
+              <small>{{ card.cameraLabel }}</small>
+            </div>
+            <el-tag
+              :type="card.liveFrame ? 'success' : card.latest ? 'warning' : 'info'"
+              effect="light"
+              size="small"
+            >
+              {{ card.liveFrame ? '实时画面' : card.latest ? '历史标注图' : '等待画面' }}
+            </el-tag>
+          </div>
+
+          <div class="camera-view-card__stage">
+            <el-image
+              v-if="card.src"
+              class="camera-view-card__image"
+              :src="card.src"
+              fit="contain"
+              :preview-src-list="[card.src]"
+              :initial-index="0"
+              hide-on-click-modal
+              :alt="`${card.cameraLabel}检测画面`"
+            >
+              <template #error>
+                <el-empty description="画面读取失败" :image-size="60" />
+              </template>
+            </el-image>
+            <el-empty v-else :image-size="56" :description="card.emptyText" />
+            <div v-if="card.liveFrame" class="camera-view-card__badge">实时</div>
+          </div>
+
+          <div class="camera-view-card__foot">
+            <div class="camera-view-card__meta">
+              <span>帧 {{ card.frameId ?? '—' }}</span>
+              <span>记录 {{ card.detectionCount }} 条</span>
+            </div>
+            <strong :class="{ 'is-positive': card.detectionCount > 0 }">{{ card.summary }}</strong>
+            <div class="camera-view-card__extra">
+              <span>{{ card.time }}</span>
+              <el-button
+                v-if="card.displayIndex >= 0"
+                text
+                type="primary"
+                size="small"
+                @click="focusCardResult(card)"
+              >
+                查看详情
+              </el-button>
+            </div>
+          </div>
+        </article>
       </div>
 
       <div v-if="detections.length" class="result-strip">
@@ -1150,6 +1393,21 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+/* 1 / 4 / 8 路显示方式切换 */
+.layout-switch {
+  width: 100%;
+}
+
+.layout-switch :deep(.el-radio-button) {
+  flex: 1;
+}
+
+.layout-switch :deep(.el-radio-button__inner) {
+  width: 100%;
+  padding: 9px 6px;
+  font-size: 13px;
+}
+
 .field-hint {
   margin-top: 4px;
   color: var(--el-text-color-secondary);
@@ -1223,6 +1481,148 @@ onBeforeUnmount(() => {
 
 .label-tag + .label-tag {
   margin-left: 6px;
+}
+
+/* 四路 / 八路多画面网格 */
+.camera-view-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.camera-view-grid--four {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.camera-view-grid--eight {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.camera-view-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-blank);
+  transition: border-color .2s, box-shadow .2s;
+}
+
+.camera-view-card.is-live {
+  border-color: var(--el-color-success-light-5);
+  box-shadow: 0 0 0 1px var(--el-color-success-light-8);
+}
+
+.camera-view-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 46px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.camera-view-card__title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.camera-view-card__title strong {
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.camera-view-card__title small {
+  overflow: hidden;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.camera-view-card__stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 16 / 10;
+  /* 与单路大画面保持一致的浅色底，避免多路网格出现黑块。 */
+  background: var(--el-fill-color-lighter);
+}
+
+.camera-view-card__image {
+  width: 100%;
+  height: 100%;
+}
+
+.camera-view-card__image :deep(img) {
+  object-fit: contain;
+}
+
+.camera-view-card__stage :deep(.el-empty) {
+  padding: 8px 10px;
+  box-sizing: border-box;
+  --el-empty-padding: 0;
+}
+
+.camera-view-card__stage :deep(.el-empty__description p) {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.camera-view-card__badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(19, 26, 32, .72);
+  color: #7ee0a3;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+
+.camera-view-card__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 12px 11px;
+  font-size: 11px;
+}
+
+.camera-view-card__meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--el-text-color-secondary);
+}
+
+.camera-view-card__foot > strong {
+  overflow: hidden;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.camera-view-card__foot > strong.is-positive {
+  color: var(--el-color-danger);
+}
+
+.camera-view-card__extra {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
 }
 
 .result-strip {
@@ -1309,6 +1709,12 @@ onBeforeUnmount(() => {
   }
 }
 
+@media (max-width: 1400px) {
+  .camera-view-grid--eight {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1200px) {
   .panel-row,
   .results-layout {
@@ -1318,8 +1724,15 @@ onBeforeUnmount(() => {
 
 @media (max-width: 720px) {
   .camera-grid,
-  .media-row {
+  .media-row,
+  .camera-view-grid--four,
+  .camera-view-grid--eight {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-head {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>
