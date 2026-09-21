@@ -23,6 +23,15 @@ export function apiErrorCode(error) {
   return error?.response?.data?.code || ''
 }
 
+function serverBaseUrl() {
+  return String(import.meta.env.VITE_SERVER_URL || '').replace(/\/$/, '')
+}
+
+function wsBaseUrl() {
+  const base = serverBaseUrl() || (typeof window !== 'undefined' ? window.location.origin : '')
+  return base.replace(/^http/, 'ws')
+}
+
 function createId(prefix) {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
   return `${prefix}-${random}`.slice(0, 120)
@@ -75,13 +84,13 @@ export function getDetectionImage(taskRunId, imageId) {
 export function getInspectionImageUrl(taskRunId, imageId) {
   if (!taskRunId || !imageId) return ''
   const encoded = encodeURIComponent(imageId).replace(/%3A/gi, ':')
-  return `${import.meta.env.VITE_SERVER_URL}/api/v1/inspections/${encodeURIComponent(taskRunId)}/images/${encoded}`
+  return `${serverBaseUrl()}/api/v1/inspections/${encodeURIComponent(taskRunId)}/images/${encoded}`
 }
 
 /** 巡检实时流：状态、检测页和最新标注帧。 */
 export function getInspectionStreamUrl(taskRunId) {
   if (!taskRunId) return ''
-  return `${String(import.meta.env.VITE_SERVER_URL).replace(/^http/, 'ws')}/ws/inspections/${encodeURIComponent(taskRunId)}`
+  return `${wsBaseUrl()}/ws/inspections/${encodeURIComponent(taskRunId)}`
 }
 
 /** 机器人和全部设备摘要，页面用它读取 8 路摄像头和麦克风的真实状态。 */
@@ -155,7 +164,7 @@ let leaseId = ''
 
 async function ensureLease(mode = 'manual_local') {
   if (leaseId) return leaseId
-  const lease = unwrap(await acquireControlLease({ holder: 'inspection-console', mode }), {})
+  const lease = unwrap(await acquireControlLease({ holder: import.meta.env.VITE_CONTROL_HOLDER || 'inspection-console', mode }), {})
   leaseId = lease?.leaseId || lease?.id || ''
   if (!leaseId) throw new Error('后端未返回控制租约 leaseId')
   return leaseId
@@ -167,7 +176,7 @@ async function dispatchDeviceCommand(target, action, payload = {}) {
     return await sendDeviceCommand({
       target,
       action,
-      issuer: 'inspection-console',
+      issuer: import.meta.env.VITE_CONTROL_HOLDER || 'inspection-console',
       leaseId: activeLease,
       idempotencyKey: createId('ui-command'),
       traceId: createId('trace'),

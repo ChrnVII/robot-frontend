@@ -1,94 +1,115 @@
 <script setup>
+// 应用外壳：左侧固定导航 + 右侧页面内容。
+// 导航项与 api/dashboard.js 的模块定义同源，新增页面只需改一处。
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { getPlatformReady } from '@/api/system'
+import {
+  Bell, DataLine, Document, MapLocation, Odometer, Operation, Setting, Van, VideoCamera
+} from '@element-plus/icons-vue'
+import { DASHBOARD_MODULES } from '@/api/dashboard'
+import { getHealth, getPlatformInfo } from '@/api/system'
+import { unwrap } from '@/api/envelope'
 
 const route = useRoute()
 const isPlatformOnline = ref(false)
+const platform = ref({ robotId: '', mode: '', coreStatus: '' })
+const platformError = ref('')
 
-const navigation = [
-  { label: '运行总览', path: '/home', icon: '⌂' },
-  { label: '智能检测', path: '/detect', icon: '◉' },
-  { label: '任务管理', path: '/tasks', icon: '≡' },
-  { label: '摄像头', path: '/cam', icon: '▣' },
-  { label: '升降控制', path: '/lift', icon: '↕' },
-  { label: '移动底盘', path: '/agv', icon: '▰' },
-  { label: '地图站点', path: '/map', icon: '⌖' },
-  { label: '参数设置', path: '/params', icon: '⚙' },
-  { label: '运行数据', path: '/runs', icon: '◫' },
-  { label: '告警数据', path: '/alerts', icon: '△' },
-  { label: '默认任务', path: '/task-tmpl', icon: '✦' },
-]
+// 模块图标按 key 映射，键与 api/dashboard.js 的 DASHBOARD_MODULES 一致。
+const MODULE_ICONS = {
+  detect: Odometer,
+  tasks: Document,
+  cam: VideoCamera,
+  lift: Operation,
+  agv: Van,
+  map: MapLocation,
+  params: Setting,
+  runs: DataLine,
+  alerts: Bell,
+  'task-tmpl': Document
+}
 
+// 首页单独放在导航最上面，其余模块与 dashboard 定义保持一致。
+const navigation = computed(() => [
+  { key: 'home', path: '/home', label: '运行总览', icon: Odometer },
+  ...DASHBOARD_MODULES.map((module) => ({
+    key: module.key,
+    path: module.path,
+    label: module.label,
+    icon: MODULE_ICONS[module.key] || Document
+  }))
+])
 
-const pageTitle = computed(() => {
-  return navigation.find((item) => item.path === route.path)?.label ?? '运行总览'
-})
+const activePath = computed(() => route.path)
+const footerText = computed(() => platformError.value || platform.value.robotId || 'Inspection Robot')
 
-async function fetchReady(){
-  try {
-    const resp = await getPlatformReady()
-    isPlatformOnline.value = resp?.status === 200
-  } catch (error) {
-    console.error('请求失败：', error)
-    isPlatformOnline.value = false
+async function fetchReady() {
+  platformError.value = ''
+  const [healthResult, platformResult] = await Promise.allSettled([
+    getHealth(),
+    getPlatformInfo()
+  ])
+  const health = healthResult.status === 'fulfilled' ? unwrap(healthResult.value, null) : null
+  const info = platformResult.status === 'fulfilled' ? unwrap(platformResult.value, {}) : {}
+  isPlatformOnline.value = Boolean(health)
+  platform.value = {
+    robotId: info?.robotId || health?.robotId || '',
+    mode: info?.mode || '',
+    coreStatus: health?.coreStatus || health?.status || ''
+  }
+  const failed = [
+    healthResult.status === 'rejected' ? `健康检查：${healthResult.reason?.message || '失败'}` : '',
+    platformResult.status === 'rejected' ? `平台信息：${platformResult.reason?.message || '失败'}` : ''
+  ].filter(Boolean)
+  if (failed.length) {
+    platformError.value = failed.join('；')
+    console.error('平台状态读取失败：', failed.join('；'))
   }
 }
 
-onMounted(() => {
-  requestAnimationFrame(() => {
-    fetchReady()
-  })
-})
-
+onMounted(fetchReady)
 </script>
-
-
-
 
 <template>
   <div class="app-shell">
-
     <aside class="app-sidebar">
-
       <div class="brand">
-        <div class="brand-mark">IR</div><div><strong>巡检机器人</strong><span>ROBOT CONTROL</span></div>
+        <div class="brand-mark">IR</div>
+        <div>
+          <strong>巡检机器人</strong>
+          <span>ROBOT CONTROL</span>
+        </div>
       </div>
 
-      <nav class="sidebar-nav" aria-label="主导航">
-          <RouterLink v-for="item in navigation" :key="item.path" :to="item.path" class="nav-item">
-            <span class="nav-icon">{{ item.icon }}</span><span>{{ item.label }}</span>
+      <el-scrollbar class="sidebar-scroll">
+        <nav class="sidebar-nav" aria-label="主导航">
+          <RouterLink
+            v-for="item in navigation"
+            :key="item.path"
+            :to="item.path"
+            class="nav-item"
+            :class="{ 'nav-item--active': activePath === item.path }"
+          >
+            <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+            <span>{{ item.label }}</span>
           </RouterLink>
-      </nav>
+        </nav>
+      </el-scrollbar>
 
       <div class="sidebar-footer">
-
-          <template v-if="isPlatformOnline">
-            <span class="online-dot"></span><div><strong>系统在线</strong><small>Inspection Robot</small></div>
-          </template>
-          <template v-else>
-            <span class="offline-dot"></span><div><strong>系统离线</strong><small>Inspection Robot</small></div>
-          </template>
-
-
-        
+        <span :class="isPlatformOnline ? 'dot dot--online' : 'dot dot--offline'" />
+        <div>
+          <strong>{{ isPlatformOnline ? '系统在线' : '系统离线' }}</strong>
+          <small>{{ footerText }}</small>
+        </div>
       </div>
-
     </aside>
 
     <section class="app-main">
-
-      <!-- <header class="app-header">
-        <div><span class="header-kicker">CONTROL CENTER / 2026</span><h1>{{ pageTitle }}</h1></div>
-        <div class="header-meta"><span>实时控制台</span><span class="header-user">管理员</span></div>
-      </header> -->
-
       <main class="page-content">
         <RouterView />
       </main>
-
     </section>
-
   </div>
 </template>
 
@@ -115,7 +136,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 11px 28px;
+  padding: 0 11px 22px;
 }
 
 .brand-mark {
@@ -149,8 +170,13 @@ onMounted(() => {
   letter-spacing: 2px;
 }
 
-.sidebar-nav {
+.sidebar-scroll {
   flex: 1;
+  min-height: 0;
+}
+
+.sidebar-nav {
+  padding-right: 4px;
 }
 
 .nav-item {
@@ -162,7 +188,7 @@ onMounted(() => {
   border-radius: 4px;
   color: #606266;
   font-size: 14px;
-  transition: .2s;
+  transition: 0.2s;
 }
 
 .nav-item:hover {
@@ -170,18 +196,14 @@ onMounted(() => {
   background: #f5f7fa;
 }
 
-.nav-item.router-link-active {
+.nav-item--active {
   color: #409eff;
   background: #ecf5ff;
   font-weight: 600;
 }
 
 .nav-icon {
-  width: 18px;
-  text-align: center;
-  color: inherit;
   font-size: 17px;
-  opacity: .9;
 }
 
 .sidebar-footer {
@@ -192,19 +214,20 @@ onMounted(() => {
   border-top: 1px solid #f0f2f5;
 }
 
-.online-dot {
+.dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #67c23a;
-  box-shadow: 0 0 0 4px rgba(103, 194, 58, .13);
 }
-.offline-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+
+.dot--online {
+  background: #67c23a;
+  box-shadow: 0 0 0 4px rgb(103 194 58 / 13%);
+}
+
+.dot--offline {
   background: #969696;
-  box-shadow: 0 0 0 4px rgba(126, 126, 126, 0.13);
+  box-shadow: 0 0 0 4px rgb(126 126 126 / 13%);
 }
 
 .sidebar-footer strong,
@@ -231,51 +254,11 @@ onMounted(() => {
   overflow-y: auto;
 }
 
-.app-header {
-  height: 82px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 40px;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
-}
-
-.header-kicker {
-  color: #409eff;
-  font-size: 10px;
-  letter-spacing: 1.7px;
-  font-weight: 700;
-}
-
-.app-header h1 {
-  margin: 5px 0 0;
-  color: #303133;
-  font-size: 24px;
-  letter-spacing: -.4px;
-}
-
-.header-meta {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  color: #909399;
-  font-size: 12px;
-}
-
-.header-user {
-  padding: 7px 12px;
-  border: 1px solid #dcdfe6;
-  border-radius: 4px;
-  background: #fff;
-  color: #606266;
-}
-
 .page-content {
   padding: 26px 40px 40px;
 }
 
-@media (max-width:900px) {
+@media (max-width: 900px) {
   .app-sidebar {
     width: 76px;
     flex-basis: 76px;
@@ -284,12 +267,12 @@ onMounted(() => {
 
   .brand {
     justify-content: center;
-    padding: 0 0 26px;
+    padding: 0 0 20px;
   }
 
-  .brand>div:last-child,
-  .nav-item span:last-child,
-  .sidebar-footer>div {
+  .brand > div:last-child,
+  .nav-item span,
+  .sidebar-footer > div {
     display: none;
   }
 
@@ -302,10 +285,6 @@ onMounted(() => {
     justify-content: center;
     padding-left: 0;
     padding-right: 0;
-  }
-
-  .app-header {
-    padding: 0 22px;
   }
 
   .page-content {

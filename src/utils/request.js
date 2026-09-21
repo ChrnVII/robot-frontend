@@ -1,69 +1,115 @@
-import axios from 'axios';
+import axios from 'axios'
 
-// 创建 Axios 实例
+// 统一 Axios 实例：真实后端地址由 VITE_SERVER_URL 提供；开发环境建议留空并走 Vite 代理。
+const rawBaseUrl = import.meta.env.VITE_SERVER_URL
+const baseURL = rawBaseUrl ? String(rawBaseUrl).replace(/\/$/, '') : ''
+const timeout = Number(import.meta.env.VITE_REQUEST_TIMEOUT) || 10000
+
+const SUCCESS_CODES = new Set(['OK', 'ok', 'SUCCESS', 'success', 0, '0', 200, '200'])
+
+let lastTraceId = ''
+
+export function createRequestId(prefix = 'trace') {
+  const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `${prefix}-${random}`.slice(0, 128)
+}
+
+export function getLastTraceId() {
+  return lastTraceId
+}
+
+export class ApiError extends Error {
+  constructor(message, { type = 'http', status = 0, code = '', traceId = '', cause } = {}) {
+    super(message, { cause })
+    this.name = 'ApiError'
+    this.type = type
+    this.status = status
+    this.code = code
+    this.traceId = traceId
+    // 兼容 axios / Element Plus 组件里常见的 error.response 读取方式。
+    this.response = { status, data: { code, message, traceId } }
+  }
+}
+
+/** 从任意错误中提炼用户可读的错误文案。 */
+export function getErrorMessage(error, fallback = '操作失败，请稍后重试') {
+  if (!error) return fallback
+  if (error instanceof ApiError && error.message) return error.message
+  const body = error?.response?.data
+  if (body?.message) return body.code ? `${body.message}（${body.code}）` : body.message
+  if (error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')) {
+    return '请求超时，请检查后端服务或网络连接'
+  }
+  if (!error?.response && error?.message) return `无法连接后端服务：${error.message}`
+  if (error?.message) return error.message
+  return fallback
+}
+
+function httpStatusMessage(status) {
+  if (status === 401) return '登录状态已失效，请重新登录'
+  if (status === 403) return '当前账号没有执行该操作的权限'
+  if (status === 404) return '后端未提供该接口或资源不存在'
+  if (status === 409) return '设备或后端拒绝了本次操作'
+  if (status === 422) return '请求参数不合法'
+  if (status >= 500) return '后端服务异常'
+  return `请求失败（HTTP ${status}）`
+}
+
 const service = axios.create({
-  baseURL: import.meta.env.VITE_SERVER_URL,  // 从环境变量读取基础地址
-  timeout: 10000,                          // 请求超时时间
+  baseURL,
+  timeout,
   headers: { 'Content-Type': 'application/json' }
-});
+})
 
-// ---------- 请求拦截器 ----------
-// service.interceptors.request.use(
-//   (config) => {
-//     // 在请求发送前做些什么（例如添加 Token）
-//     const token = localStorage.getItem('token');
-//     if (token) {
-//       config.headers.Authorization = `Bearer ${token}`;
-//     }
-//     // 可根据需要处理请求数据（如序列化）
-//     return config;
-//   },
-//   (error) => {
-//     // 请求错误时的处理
-//     console.error('请求错误：', error);
-//     return Promise.reject(error);
-//   }
-// );
+service.interceptors.request.use(
+  (config) => {
+    const traceId = config.headers['X-Trace-Id'] || createRequestId('trace')
+    config.headers['X-Trace-Id'] = traceId
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('access_token') : ''
+    if (token) config.headers.Authorization = `Bearer ${token}`
+    return config
+  },
+  (error) => Promise.reject(new ApiError(getErrorMessage(error), { type: 'request', cause: error }))
+)
 
-// ---------- 响应拦截器 ----------
-// service.interceptors.response.use(
-//   (response) => {
-//     // 对响应数据做统一处理（例如直接返回 data）
-//     const res = response.data;
-//     // 假设后端约定 code === 200 表示成功
-//     if (res.code !== 200) {
-//       // 业务错误提示（可统一使用 UI 组件库的 Message）
-//       console.warn('业务错误：', res.message || '请求失败');
-//       return Promise.reject(new Error(res.message || 'Error'));
-//     }
-//     return res; // 返回完整响应体，或只返回 res.data
-//   },
-//   (error) => {
-//     // HTTP 状态码错误处理
-//     const { response } = error;
-//     if (response) {
-//       // 根据状态码进行统一处理（如 401 跳转登录）
-//       switch (response.status) {
-//         case 401:
-//           // 清除 token 并跳转到登录页
-//           localStorage.removeItem('token');
-//           window.location.href = '/login';
-//           break;
-//         case 403:
-//           console.error('权限不足');
-//           break;
-//         case 404:
-//           console.error('请求资源不存在');
-//           break;
-//         default:
-//           console.error(`请求错误 ${response.status}：`, response.data?.message);
-//       }
-//     } else {
-//       // 网络异常或无响应
-//       console.error('网络异常，请检查连接');
-//     }
-//     return Promise.reject(error);
-//   }
-// );
+service.interceptors.response.use(
+  (response) => {
+    const traceId = response.headers?.['x-trace-id'] || response.headers?.['X-Trace-Id'] || ''
+    lastTraceId = traceId
+    const body = response.data
+    if (body && typeof body === 'object' && !Array.isArray(body) && 'code' in body
+      && !SUCCESS_CODES.has(body.code)) {
+      const message = body.message || body.msg || '后端返回了业务失败'
+      return Promise.reject(new ApiError(
+        body.code ? `${message}（${body.code}）` : message,
+        { type: 'business', status: response.status, code: body.code, traceId: body.traceId || traceId }
+      ))
+    }
+    return response
+  },
+  (error) => {
+    if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') {
+      return Promise.reject(new ApiError('请求已取消', { type: 'cancelled', cause: error }))
+    }
+    const status = Number(error?.response?.status) || 0
+    const body = error?.response?.data
+    const traceId = body?.traceId || error?.response?.headers?.['x-trace-id'] || lastTraceId
+    if (error?.code === 'ECONNABORTED' || /timeout/i.test(error?.message || '')) {
+      return Promise.reject(new ApiError('请求超时，请检查后端服务或网络连接', {
+        type: 'timeout', status, code: body?.code, traceId, cause: error
+      }))
+    }
+    if (!error?.response) {
+      return Promise.reject(new ApiError('无法连接后端服务，请检查服务是否启动或 VITE_SERVER_URL 配置', {
+        type: 'network', code: body?.code, traceId, cause: error
+      }))
+    }
+    const message = body?.message || body?.msg || httpStatusMessage(status)
+    return Promise.reject(new ApiError(
+      body?.code ? `${message}（${body.code}）` : message,
+      { type: 'http', status, code: body?.code, traceId, cause: error }
+    ))
+  }
+)
 
-export default service;
+export default service

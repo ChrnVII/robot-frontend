@@ -62,6 +62,11 @@ const routes = [
     name: 'detections',
     component: () => import('../views/DetectionsView.vue'),
   },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    redirect: '/home',
+  },
 ]
 
 const router = createRouter({
