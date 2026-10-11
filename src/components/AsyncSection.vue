@@ -1,5 +1,8 @@
 <script setup>
 // 异步区块：统一 loading / error / 空数据 三种中间态，页面只写业务内容。
+// 关键约定：error 只在内容顶部叠加一条可重试的提示条，不再吞掉默认插槽，
+//           这样后端不可用时页面框架（表头、卡片、表格和按钮）依旧完整可见，
+//           页面自身只需保证插槽里的取值对 null / undefined 有兜底。
 defineProps({
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
@@ -19,16 +22,21 @@ const emit = defineEmits(['retry'])
     <p class="async-section__hint">{{ loadingText }}</p>
   </div>
 
-  <div v-else-if="error" class="async-section__error">
-    <el-alert type="error" :closable="false" show-icon :title="error" />
-    <el-button class="async-section__retry" size="small" type="primary" plain @click="emit('retry')">重新加载</el-button>
-  </div>
+  <template v-else>
+    <!-- 读取失败时只提示不遮挡：页面框架继续渲染，用户仍能看到结构并手动重试 -->
+    <div v-if="error" class="async-section__error" role="alert">
+      <el-alert type="error" :closable="false" show-icon :title="error" />
+      <el-button class="async-section__retry" size="small" type="primary" plain @click="emit('retry')">
+        重新加载
+      </el-button>
+    </div>
 
-  <el-empty v-else-if="empty" :description="emptyText">
-    <slot name="empty" />
-  </el-empty>
+    <el-empty v-if="empty" :description="emptyText">
+      <slot name="empty" />
+    </el-empty>
 
-  <slot v-else />
+    <slot v-else />
+  </template>
 </template>
 
 <style scoped>

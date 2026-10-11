@@ -89,7 +89,8 @@ function quickStop() {
       </template>
     </PageHeader>
 
-    <AsyncSection :loading="loading && !updatedAt" :error="error" loading-text="正在读取机器人状态…" @retry="refresh">
+    <!-- 骨架屏只在首次读取（尚未失败过）时出现；一旦出错就保持页面框架 + 顶部错误条 -->
+    <AsyncSection :loading="loading && !updatedAt && !error" :error="error" loading-text="正在读取机器人状态…" @retry="refresh">
       <div class="metric-grid">
         <MetricCard label="剩余电量" :value="displayNumber(state.battery)" unit="%" :type="percentStatus(state.battery)" />
         <MetricCard label="当前任务" :value="state.task ?? '—'" :hint="state.paused ? '任务已暂停' : '任务运行中'" type="primary" />

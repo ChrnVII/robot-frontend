@@ -38,6 +38,11 @@ const routes = [
     component: () => import('../views/AgvView.vue'),
   },
   {
+    path: '/track', // 底盘循迹（独立后端）
+    name: 'track',
+    component: () => import('../views/track.vue'),
+  },
+  {
     path: '/runs', // 运行数据
     name: 'runs',
     component: () => import('../views/RunsView.vue'),

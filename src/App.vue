@@ -4,7 +4,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import {
-  Bell, DataLine, Document, MapLocation, Odometer, Operation, Setting, Van, VideoCamera
+  Bell, DataLine, Document, Guide, MapLocation, Odometer, Operation, Setting, Van, VideoCamera
 } from '@element-plus/icons-vue'
 import { DASHBOARD_MODULES } from '@/api/dashboard'
 import { getHealth, getPlatformInfo } from '@/api/system'
@@ -30,18 +30,31 @@ const MODULE_ICONS = {
 }
 
 // 首页单独放在导航最上面，其余模块与 dashboard 定义保持一致。
-const navigation = computed(() => [
-  { key: 'home', path: '/home', label: '运行总览', icon: Odometer },
-  ...DASHBOARD_MODULES.map((module) => ({
-    key: module.key,
-    path: module.path,
-    label: module.label,
-    icon: MODULE_ICONS[module.key] || Document
-  }))
-])
+// 底盘循迹对接的是独立后端，不属于 dashboard 模块，只在侧边栏挂在「移动底盘」之后。
+const TRACK_NAV_ITEM = { key: 'track', path: '/track', label: '底盘循迹', icon: Guide }
+
+const navigation = computed(() => {
+  const items = [
+    { key: 'home', path: '/home', label: '运行总览', icon: Odometer },
+    ...DASHBOARD_MODULES.map((module) => ({
+      key: module.key,
+      path: module.path,
+      label: module.label,
+      icon: MODULE_ICONS[module.key] || Document
+    }))
+  ]
+  const agvIndex = items.findIndex((item) => item.key === 'agv')
+  items.splice(agvIndex === -1 ? items.length : agvIndex + 1, 0, TRACK_NAV_ITEM)
+  return items
+})
 
 const activePath = computed(() => route.path)
-const footerText = computed(() => platformError.value || platform.value.robotId || 'Inspection Robot')
+// 侧边栏底部只留一行短文案：后端报错时也用「后端连接异常」占位，
+// 完整错误挂到 title 上，避免长错误文案撑破 248px 的侧栏。
+const footerText = computed(() => (
+  platformError.value ? '后端连接异常' : platform.value.robotId || 'Inspection Robot'
+))
+const footerTitle = computed(() => platformError.value || footerText.value)
 
 async function fetchReady() {
   platformError.value = ''
@@ -96,7 +109,7 @@ onMounted(fetchReady)
         <span :class="isPlatformOnline ? 'dot dot--online' : 'dot dot--offline'" />
         <div>
           <strong>{{ isPlatformOnline ? '系统在线' : '系统离线' }}</strong>
-          <small>{{ footerText }}</small>
+          <small :title="footerTitle">{{ footerText }}</small>
         </div>
       </div>
     </aside>
@@ -226,9 +239,19 @@ onMounted(fetchReady)
   box-shadow: 0 0 0 4px rgb(126 126 126 / 13%);
 }
 
+.sidebar-footer > div {
+  min-width: 0;
+}
+
 .sidebar-footer strong,
 .sidebar-footer small {
   display: block;
+}
+
+.sidebar-footer small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-footer strong {

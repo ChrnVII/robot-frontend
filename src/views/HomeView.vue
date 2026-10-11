@@ -74,7 +74,8 @@ function openModule(path) {
       </template>
     </PageHeader>
 
-    <AsyncSection :loading="loading && !data" :error="error" loading-text="正在汇总平台状态…" @retry="load">
+    <!-- 骨架屏只在首次汇总（尚未失败过）时出现；一旦出错就保持页面框架 + 顶部错误条 -->
+    <AsyncSection :loading="loading && !data && !error" :error="error" loading-text="正在汇总平台状态…" @retry="load">
       <el-alert
         v-if="data?.errors?.length"
         class="home-errors"
