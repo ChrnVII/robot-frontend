@@ -10,21 +10,12 @@ import request from '@/utils/request'
 import { unwrapRows } from './envelope'
 import { sendDeviceCommand } from './safety'
 
-export const TASK_ENABLED_OPTIONS = [
-  { value: true, label: '开启' },
-  { value: false, label: '关闭' }
-]
-
 export const LIGHT_MODE_OPTIONS = [
   { value: 0, label: '正常' },
   { value: 2, label: '上补光' },
   { value: 3, label: '下补光' },
   { value: 9, label: '关灯' }
 ]
-
-export function lightModeLabel(value) {
-  return LIGHT_MODE_OPTIONS.find((item) => item.value === Number(value))?.label || String(value ?? '')
-}
 
 export const RUN_TYPE_OPTIONS = [
   { value: '开补光灯', label: '开补光灯' },

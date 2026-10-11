@@ -6,10 +6,11 @@ import {
   VideoCamera, VideoCameraFilled, VideoPause, VideoPlay
 } from '@element-plus/icons-vue'
 import { getPlatformInfo } from '@/api/system'
+import { apiErrorMessage, unwrap } from '@/api/envelope'
 import {
-  apiErrorMessage, captureMedia, getDetections, getInspectionConfig, getInspectionImageUrl,
+  captureMedia, getDetections, getInspectionConfig, getInspectionImageUrl,
   getInspectionStatus, getInspectionStreamUrl, getRobotState, moveInspectionLift, startInspection,
-  stopInspection, stopInspectionLift, unwrap
+  stopInspection, stopInspectionLift
 } from '@/api/inspection'
 
 // 后端巡检模式只接受 1 / 4 / 8 路摄像头，通道数量决定 mode。
@@ -805,12 +806,11 @@ onBeforeUnmount(() => {
 <template>
   <div class="detection-view">
     <div class="panel-row">
-      <!-- 01 / INPUTS：参与检测的摄像头与音频、升降输入 -->
+      <!-- 参与检测的摄像头与音频、升降输入 -->
       <el-card ref="inputPanelRef" class="panel" shadow="never">
         <template #header>
           <div class="panel-head">
             <div class="panel-head__title">
-              <span class="eyebrow">01 / INPUTS</span>
               <h2>摄像头与音频</h2>
             </div>
             <div class="panel-head__meta">
@@ -911,7 +911,7 @@ onBeforeUnmount(() => {
         </div>
       </el-card>
 
-      <!-- 02 / CONFIGURATION：运行环境、模型与 1 / 4 / 8 路显示方式 -->
+      <!-- 运行环境、模型与 1 / 4 / 8 路显示方式 -->
       <el-card
         class="panel panel--config"
         :class="{ 'has-top-overflow': configScroll.top, 'has-bottom-overflow': configScroll.bottom }"
@@ -921,7 +921,6 @@ onBeforeUnmount(() => {
         <template #header>
           <div class="panel-head">
             <div class="panel-head__title">
-              <span class="eyebrow">02 / CONFIGURATION</span>
               <h2>运行配置</h2>
             </div>
             <div class="panel-head__meta">
@@ -1040,12 +1039,11 @@ onBeforeUnmount(() => {
       </el-card>
     </div>
 
-    <!-- 03 / RESULTS：单路大画面、四路 / 八路网格、阳性记录详情 -->
+    <!-- 单路大画面、四路 / 八路网格、阳性记录详情 -->
     <el-card class="panel" shadow="never">
       <template #header>
         <div class="panel-head">
           <div class="panel-head__title">
-            <span class="eyebrow">03 / RESULTS</span>
             <h2>检测结果</h2>
           </div>
           <div class="panel-head__meta">
@@ -1381,19 +1379,11 @@ onBeforeUnmount(() => {
 }
 
 .panel-head__title h2 {
-  margin: 4px 0 0;
+  margin: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--el-text-color-primary);
   letter-spacing: 0;
-}
-
-.eyebrow {
-  display: block;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .12em;
-  color: var(--el-text-color-secondary);
 }
 
 .panel-head__meta {

@@ -31,12 +31,6 @@ const COMMAND_ICONS = {
   gotoStation: SwitchButton
 }
 
-// 需要额外输入参数的按钮。
-const EXTRA_FIELDS = {
-  startTask: 'task',
-  gotoStation: 'station'
-}
-
 const { telemetry, loading, error, updatedAt, refresh } = useTelemetry()
 const { pendingKey, run } = useAsyncTask()
 

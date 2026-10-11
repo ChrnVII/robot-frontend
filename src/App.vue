@@ -12,7 +12,7 @@ import { unwrap } from '@/api/envelope'
 
 const route = useRoute()
 const isPlatformOnline = ref(false)
-const platform = ref({ robotId: '', mode: '', coreStatus: '' })
+const platform = ref({ robotId: '' })
 const platformError = ref('')
 
 // 模块图标按 key 映射，键与 api/dashboard.js 的 DASHBOARD_MODULES 一致。
@@ -52,11 +52,7 @@ async function fetchReady() {
   const health = healthResult.status === 'fulfilled' ? unwrap(healthResult.value, null) : null
   const info = platformResult.status === 'fulfilled' ? unwrap(platformResult.value, {}) : {}
   isPlatformOnline.value = Boolean(health)
-  platform.value = {
-    robotId: info?.robotId || health?.robotId || '',
-    mode: info?.mode || '',
-    coreStatus: health?.coreStatus || health?.status || ''
-  }
+  platform.value = { robotId: info?.robotId || health?.robotId || '' }
   const failed = [
     healthResult.status === 'rejected' ? `健康检查：${healthResult.reason?.message || '失败'}` : '',
     platformResult.status === 'rejected' ? `平台信息：${platformResult.reason?.message || '失败'}` : ''

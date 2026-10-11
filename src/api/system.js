@@ -1,13 +1,4 @@
-import request from '@/utils/request';
-
-// 登录 get
-// export function login(data) {
-//   return request({
-//     url: '/user/login',
-//     method: 'post',
-//     data
-//   });
-// }
+import request from '@/utils/request'
 
 // 后端和 robot-core 健康检查
 export function getHealth(params) {
@@ -27,15 +18,6 @@ export function getPlatformInfo(params) {
   });
 }
 
-// 判断平台是否已就绪
-export function getPlatformReady(params) {
-  return request({
-    url: '/readyz',
-    method: 'get',
-    params
-  });
-}
-
 // 获取组件和协议版本
 export function getVersion(params) {
   return request({
@@ -44,5 +26,3 @@ export function getVersion(params) {
     params
   });
 }
-
-// 其他业务接口...

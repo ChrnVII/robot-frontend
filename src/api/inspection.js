@@ -1,27 +1,7 @@
 import request from '@/utils/request'
+import { createId, unwrap } from './envelope'
 
-// 后端统一返回 { code, message, data, traceId, timestamp }；这里统一解包，视图不再重复判断。
-export function unwrap(response, fallback = null) {
-  if (response === undefined || response === null) return fallback
-  const body = response.data !== undefined ? response.data : response
-  if (body && typeof body === 'object' && !Array.isArray(body)
-    && body.data !== undefined && ('code' in body || 'traceId' in body)) {
-    return body.data ?? fallback
-  }
-  return body ?? fallback
-}
-
-// 后端错误码必须原样透出，便于区分 409 设备拒绝和 503 核心不可达。
-export function apiErrorMessage(error, fallback = '请求失败') {
-  const body = error?.response?.data
-  if (body?.message) return body.code ? `${body.message}（${body.code}）` : body.message
-  if (error?.message) return error.message
-  return fallback
-}
-
-export function apiErrorCode(error) {
-  return error?.response?.data?.code || ''
-}
+// 后端统一返回 { code, message, data, traceId, timestamp }，解包统一走 envelope 的工具。
 
 function serverBaseUrl() {
   return String(import.meta.env.VITE_SERVER_URL || '').replace(/\/$/, '')
@@ -30,11 +10,6 @@ function serverBaseUrl() {
 function wsBaseUrl() {
   const base = serverBaseUrl() || (typeof window !== 'undefined' ? window.location.origin : '')
   return base.replace(/^http/, 'ws')
-}
-
-function createId(prefix) {
-  const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  return `${prefix}-${random}`.slice(0, 120)
 }
 
 /** 启动热应激巡检：mode 为 single / four / eight，durationSeconds 为 0 表示持续运行。 */
@@ -68,14 +43,6 @@ export function getDetections(taskRunId, params) {
   })
 }
 
-export function getDetectionImage(taskRunId, imageId) {
-  return request({
-    url: `/api/v1/inspections/${encodeURIComponent(taskRunId)}/images/${encodeURIComponent(imageId)}`,
-    method: 'get',
-    responseType: 'blob'
-  })
-}
-
 /**
  * 证据图地址，前缀取 VITE_SERVER_URL。
  * imageId 形如 cam01:00000001_result.jpg，冒号属于 ID 本身，
@@ -101,13 +68,6 @@ export function getRobotState() {
   })
 }
 
-export function getDeviceState(deviceId) {
-  return request({
-    url: `/api/v1/devices/${encodeURIComponent(deviceId)}/state`,
-    method: 'get'
-  })
-}
-
 /** 媒体采集：摄像头抓图、热成像和麦克风录音走同一个接口。 */
 export function captureMedia(data) {
   return request({
@@ -126,7 +86,7 @@ export function getInspectionConfig(params) {
   })
 }
 
-export function acquireControlLease(data) {
+function acquireControlLease(data) {
   return request({
     url: '/api/v1/control/leases',
     method: 'post',
@@ -134,15 +94,7 @@ export function acquireControlLease(data) {
   })
 }
 
-export function releaseControlLease(leaseId, reason = 'released') {
-  return request({
-    url: `/api/v1/control/leases/${encodeURIComponent(leaseId)}`,
-    method: 'delete',
-    params: { reason }
-  })
-}
-
-export function sendDeviceCommand(data) {
+function sendDeviceCommand(data) {
   return request({
     url: '/api/v1/devices/commands',
     method: 'post',
@@ -151,7 +103,7 @@ export function sendDeviceCommand(data) {
 }
 
 /** 急停：不依赖普通控制租约，由 robot-core 抢占控制权并停止运动/升降。 */
-export function emergencyStop(data) {
+function emergencyStop(data) {
   return request({
     url: '/api/v1/emergency-stop',
     method: 'post',
@@ -199,11 +151,4 @@ export function moveInspectionLift(action) {
 /** 检测升降停止使用急停通道：robot-core 会同时停止运动和升降设备。 */
 export function stopInspectionLift() {
   return emergencyStop({ traceId: createId('trace-estop'), reason: 'operator_pressed_lift_stop' })
-}
-
-export function releaseInspectionLease() {
-  if (!leaseId) return Promise.resolve(null)
-  const current = leaseId
-  leaseId = ''
-  return releaseControlLease(current, 'inspection_page_closed')
 }

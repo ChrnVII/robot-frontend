@@ -28,24 +28,9 @@ export function unwrapRows(response, fallback = []) {
   return fallback
 }
 
-/** 分页接口的 total：后端没给数字时回退到当前页行数。 */
-export function unwrapTotal(response, rows = []) {
-  const body = unwrap(response, null)
-  const total = Number(body?.total ?? body?.totalCount ?? body?.count)
-  return Number.isFinite(total) ? total : rows.length
-}
-
 export function apiErrorMessage(error, fallback = '请求失败') {
   const body = error?.response?.data
   if (body?.message) return body.code ? `${body.message}（${body.code}）` : body.message
   if (error?.message) return error.message
   return fallback
-}
-
-export function apiErrorCode(error) {
-  return error?.response?.data?.code || error?.code || ''
-}
-
-export function isNotFound(error) {
-  return Number(error?.status ?? error?.response?.status) === 404
 }

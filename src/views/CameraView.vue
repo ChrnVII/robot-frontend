@@ -3,7 +3,7 @@
 // 帧地址与命令都经 api/safety.js 下发；页面只负责定时刷新画面和交互状态。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  Aim, Camera, Delete, Plus, Refresh, RefreshRight, SwitchButton, VideoCamera, Warning
+  Aim, Camera, Delete, Plus, Refresh, RefreshRight, SwitchButton, Warning
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'

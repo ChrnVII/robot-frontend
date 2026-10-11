@@ -14,10 +14,6 @@ export function createRequestId(prefix = 'trace') {
   return `${prefix}-${random}`.slice(0, 128)
 }
 
-export function getLastTraceId() {
-  return lastTraceId
-}
-
 export class ApiError extends Error {
   constructor(message, { type = 'http', status = 0, code = '', traceId = '', cause } = {}) {
     super(message, { cause })

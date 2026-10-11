@@ -82,22 +82,10 @@ export function getEnvironmentState(params) {
   return request({ url: '/api/v1/environment', method: 'get', params })
 }
 
-export function getDeviceState(deviceId, params) {
-  return request({ url: `/api/v1/devices/${encodeURIComponent(deviceId)}/state`, method: 'get', params })
-}
-
 function websocketUrl(path = '') {
   const configured = import.meta.env.VITE_SERVER_URL || (typeof window !== 'undefined' ? window.location.origin : '')
   const base = String(configured).replace(/\/$/, '').replace(/^http/, 'ws')
   return `${base}${path.startsWith('/') ? path : `/${path}`}`
-}
-
-export function getStateStreamUrl() {
-  return websocketUrl('/ws/state')
-}
-
-export function getEnvironmentStreamUrl() {
-  return websocketUrl('/ws/environment')
 }
 
 function openStream(path, onMessage, handlers = {}) {
