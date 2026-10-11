@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   ArrowLeft, ArrowRight, Bottom, FolderOpened, Loading, Microphone, Picture, Refresh, Tools, Top,
@@ -106,6 +106,44 @@ let stream = null
 let streamRetryTimer = null
 let streamAttempts = 0
 let resultsAutoLoaded = false
+
+// 02 运行配置跟随 01 摄像头与音频的高度：卡片不外扩，超出内容在卡片内部滚动。
+const inputPanelRef = ref(null)
+const configFormRef = ref(null)
+const configPanelMaxHeight = ref('')
+// 记录表单区滚动位置，用于按需显示上/下内阴影。
+const configScroll = reactive({ top: false, bottom: false })
+let panelResizeObserver = null
+
+function syncConfigPanelHeight() {
+  // 窄屏下两栏会纵向堆叠，此时不需要强制等高。
+  if (typeof window === 'undefined' || window.innerWidth <= 1200) {
+    configPanelMaxHeight.value = ''
+    return
+  }
+  const el = inputPanelRef.value?.$el || inputPanelRef.value
+  const height = el?.getBoundingClientRect?.().height || 0
+  configPanelMaxHeight.value = height ? `${Math.round(height)}px` : ''
+}
+
+// 滚动到顶端时不显示上阴影，滚动到底部时不显示下阴影。
+function updateConfigScroll() {
+  const el = configFormRef.value?.$el || configFormRef.value
+  if (!el) {
+    configScroll.top = false
+    configScroll.bottom = false
+    return
+  }
+  const { scrollTop, scrollHeight, clientHeight } = el
+  const scrollable = scrollHeight - clientHeight > 1
+  configScroll.top = scrollable && scrollTop > 1
+  configScroll.bottom = scrollable && scrollTop + clientHeight < scrollHeight - 1
+}
+
+function handleViewportChange() {
+  syncConfigPanelHeight()
+  nextTick(updateConfigScroll)
+}
 
 const selectedCameras = computed(() => cameras.filter((camera) => camera.selected))
 const mode = computed(() => MODE_BY_CAMERA_COUNT[selectedCameras.value.length] || '')
@@ -742,6 +780,13 @@ onMounted(() => {
   restoreActiveInspection()
   deviceTimer = window.setInterval(loadDeviceStates, DEVICE_STATE_INTERVAL)
   window.addEventListener('keydown', handleKeydown)
+  handleViewportChange()
+  window.addEventListener('resize', handleViewportChange)
+  if (typeof ResizeObserver !== 'undefined') {
+    panelResizeObserver = new ResizeObserver(handleViewportChange)
+    const el = inputPanelRef.value?.$el || inputPanelRef.value
+    if (el) panelResizeObserver.observe(el)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -749,6 +794,11 @@ onBeforeUnmount(() => {
   closeStream()
   if (deviceTimer) window.clearInterval(deviceTimer)
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('resize', handleViewportChange)
+  if (panelResizeObserver) {
+    panelResizeObserver.disconnect()
+    panelResizeObserver = null
+  }
 })
 </script>
 
@@ -756,7 +806,7 @@ onBeforeUnmount(() => {
   <div class="detection-view">
     <div class="panel-row">
       <!-- 01 / INPUTS：参与检测的摄像头与音频、升降输入 -->
-      <el-card class="panel" shadow="never">
+      <el-card ref="inputPanelRef" class="panel" shadow="never">
         <template #header>
           <div class="panel-head">
             <div class="panel-head__title">
@@ -772,32 +822,27 @@ onBeforeUnmount(() => {
         </template>
 
         <div class="camera-grid">
-          <el-tooltip
+          <button
             v-for="camera in cameras"
             :key="camera.id"
-            :content="camera.selected ? '点击取消该摄像头参与检测' : '点击让该摄像头参与本次检测'"
-            placement="top"
+            type="button"
+            class="input-tile"
+            :class="{ 'is-active': camera.selected }"
+            :disabled="isRunning"
+            @click="toggleCamera(camera)"
           >
-            <button
-              type="button"
-              class="input-tile"
-              :class="{ 'is-active': camera.selected }"
-              :disabled="isRunning"
-              @click="toggleCamera(camera)"
-            >
-              <span class="input-tile__icon">
-                <el-icon>
-                  <VideoCameraFilled v-if="camera.selected" />
-                  <VideoCamera v-else />
-                </el-icon>
-              </span>
-              <span class="input-tile__body">
-                <strong>{{ camera.label }}</strong>
-                <small>{{ cameraDescription(camera) }}</small>
-              </span>
-              <span class="input-tile__state">{{ camera.selected ? 'ON' : 'OFF' }}</span>
-            </button>
-          </el-tooltip>
+            <span class="input-tile__icon">
+              <el-icon>
+                <VideoCameraFilled v-if="camera.selected" />
+                <VideoCamera v-else />
+              </el-icon>
+            </span>
+            <span class="input-tile__body">
+              <strong>{{ camera.label }}</strong>
+              <small>{{ cameraDescription(camera) }}</small>
+            </span>
+            <span class="input-tile__state">{{ camera.selected ? 'ON' : 'OFF' }}</span>
+          </button>
         </div>
 
         <div class="media-row">
@@ -867,7 +912,12 @@ onBeforeUnmount(() => {
       </el-card>
 
       <!-- 02 / CONFIGURATION：运行环境、模型与 1 / 4 / 8 路显示方式 -->
-      <el-card class="panel" shadow="never">
+      <el-card
+        class="panel panel--config"
+        :class="{ 'has-top-overflow': configScroll.top, 'has-bottom-overflow': configScroll.bottom }"
+        shadow="never"
+        :style="{ maxHeight: configPanelMaxHeight || undefined }"
+      >
         <template #header>
           <div class="panel-head">
             <div class="panel-head__title">
@@ -887,7 +937,13 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
-        <el-form label-position="top" class="config-form">
+        <el-form
+          ref="configFormRef"
+          label-position="left"
+          label-width="112px"
+          class="config-form"
+          @scroll="updateConfigScroll"
+        >
           <el-form-item label="显示方式">
             <el-radio-group
               v-model="layoutView"
@@ -956,31 +1012,31 @@ onBeforeUnmount(() => {
             />
             <p class="field-hint">0 表示持续运行，直到手动停止</p>
           </el-form-item>
-
-          <div class="config-actions">
-            <el-button
-              type="primary"
-              size="large"
-              class="config-actions__primary"
-              :icon="VideoPlay"
-              :loading="busy === 'start'"
-              :disabled="isRunning || restoring || !selectedCameras.length"
-              @click="startDetection"
-            >
-              {{ restoring ? '恢复任务中…' : '开始检测' }}
-            </el-button>
-            <el-button
-              type="danger"
-              size="large"
-              :icon="VideoPause"
-              :loading="busy === 'stop'"
-              :disabled="!isRunning"
-              @click="stopDetection"
-            >
-              停止
-            </el-button>
-          </div>
         </el-form>
+
+        <div class="config-actions">
+          <el-button
+            type="primary"
+            size="large"
+            class="config-actions__primary"
+            :icon="VideoPlay"
+            :loading="busy === 'start'"
+            :disabled="isRunning || restoring || !selectedCameras.length"
+            @click="startDetection"
+          >
+            {{ restoring ? '恢复任务中…' : '开始检测' }}
+          </el-button>
+          <el-button
+            type="danger"
+            size="large"
+            :icon="VideoPause"
+            :loading="busy === 'stop'"
+            :disabled="!isRunning"
+            @click="stopDetection"
+          >
+            停止
+          </el-button>
+        </div>
       </el-card>
     </div>
 
@@ -1215,6 +1271,108 @@ onBeforeUnmount(() => {
   padding: 20px;
 }
 
+/* 02 运行配置：高度跟随左侧卡片，表单区内部滚动，操作按钮固定在卡片底部 */
+.panel--config {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel--config :deep(.el-card__header) {
+  flex: none;
+}
+
+.panel--config :deep(.el-card__body) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  /* 内边距下移到表单与操作区，让滚动区域贴合卡片头部与底部 */
+  padding: 0;
+  /* 顶部阴影覆盖层以此为定位参照 */
+  position: relative;
+}
+
+.panel--config .config-form {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 12px 20px 20px;
+  scrollbar-gutter: stable;
+}
+
+/* 上下阴影覆盖层：绝对定位在滚动区的上下沿，绘制在表单控件“上面”
+   （inset 内阴影画在背景层、会被控件遮住，所以这里用独立的覆盖层）。
+   左右 20px 与表单内容对齐并避开右侧滚动条；pointer-events: none 不影响交互。 */
+.panel--config :deep(.el-card__body)::before,
+.panel--config .config-actions::before {
+  content: '';
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  height: 14px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 2;
+  /* 横向两端渐隐：去掉左右两条硬边，阴影不横贯整条，只在中段呈现柔和渐变 */
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 15%,
+    #000 85%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to right, transparent 0, #000 15%, #000 85%, transparent 100%);
+}
+
+/* 滚动区上沿 */
+.panel--config :deep(.el-card__body)::before {
+  top: 0;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.16), rgba(0, 0, 0, 0));
+}
+
+/* 滚动区下沿：贴在操作栏分隔线上方 */
+.panel--config .config-actions::before {
+  top: -14px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.16), rgba(0, 0, 0, 0));
+}
+
+.panel--config.has-top-overflow :deep(.el-card__body)::before {
+  opacity: 1;
+}
+
+.panel--config.has-bottom-overflow .config-actions::before {
+  opacity: 1;
+}
+
+/* 细滚动条 + 预留轨道，避免遮挡输入框右侧的图标与箭头 */
+.panel--config .config-form::-webkit-scrollbar {
+  width: 8px;
+}
+
+.panel--config .config-form::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel--config .config-form::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--el-border-color-darker);
+}
+
+.panel--config .config-form::-webkit-scrollbar-thumb:hover {
+  background: var(--el-text-color-disabled);
+}
+
+.panel--config .config-actions {
+  flex: none;
+  margin: 0;
+  padding: 16px 20px 20px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  /* 底部阴影覆盖层以此为定位参照 */
+  position: relative;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -1377,11 +1535,13 @@ onBeforeUnmount(() => {
   margin-bottom: 16px;
 }
 
+/* 名称与控件横向排列：标签固定宽度、与控件首行垂直居中，控件紧随其后不再另起一行 */
 .config-form :deep(.el-form-item__label) {
-  padding-bottom: 4px;
+  padding: 0 12px 0 0;
   color: var(--el-text-color-regular);
   font-size: 13px;
-  line-height: 1.4;
+  height: 32px;
+  line-height: 32px;
 }
 
 .config-form :deep(.el-form-item__content) {
