@@ -21,7 +21,7 @@ const RECONNECT_MIN_DELAY = 1000
 const RECONNECT_MAX_DELAY = 15000
 const MAX_DECODE_QUEUE = 8        // 解码队列积压阈值，超过只收关键帧
 
-export function useCameraStream() {
+export function useCameraStream(options = {}) {
   const mode = ref('idle')          // idle | webcodecs | fallback
   const phase = ref('idle')         // idle | connecting | waiting | live | error | stopped
   const errorText = ref('')
@@ -137,6 +137,7 @@ export function useCameraStream() {
       videoContext.drawImage(frame, 0, 0)
 
       const pts = Math.round(frame.timestamp / 1000)   // WebCodecs 用微秒，链路上是毫秒
+      options.onPaint?.(videoContext, pts, width, height)
       frame.close()
 
       lastFrameAt = performance.now()
@@ -273,7 +274,7 @@ export function useCameraStream() {
 
   function connect() {
     if (disposed || mode.value !== 'webcodecs') return
-    const url = getCameraPreviewUrl()
+    const url = options.url ? options.url() : getCameraPreviewUrl()
     if (!url) {
       blockReason.value = '未配置后端地址'
       mode.value = 'fallback'

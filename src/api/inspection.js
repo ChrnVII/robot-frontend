@@ -35,29 +35,11 @@ export function getInspectionStatus(taskRunId) {
   })
 }
 
-export function getDetections(taskRunId, params) {
-  return request({
-    url: `/api/v1/inspections/${encodeURIComponent(taskRunId)}/detections`,
-    method: 'get',
-    params
-  })
-}
-
-/**
- * 证据图地址，前缀取 VITE_SERVER_URL。
- * imageId 形如 cam01:00000001_result.jpg，冒号属于 ID 本身，
- * 后端按解码后的值校验，所以这里保留冒号不转义。
- */
-export function getInspectionImageUrl(taskRunId, imageId) {
-  if (!taskRunId || !imageId) return ''
-  const encoded = encodeURIComponent(imageId).replace(/%3A/gi, ':')
-  return `${serverBaseUrl()}/api/v1/inspections/${encodeURIComponent(taskRunId)}/images/${encoded}`
-}
-
-/** 巡检实时流：状态、检测页和最新标注帧。 */
-export function getInspectionStreamUrl(taskRunId) {
-  if (!taskRunId) return ''
-  return `${wsBaseUrl()}/ws/inspections/${encodeURIComponent(taskRunId)}`
+/** 每路视频独立解码，使用与球形摄像头相同的二进制帧协议。 */
+export function getInspectionCameraUrl(taskRunId, cameraId) {
+  const path = '/ws/inspections/' + encodeURIComponent(taskRunId) + '/cameras/' + encodeURIComponent(cameraId)
+  const token = localStorage.getItem('access_token')
+  return wsBaseUrl() + path + (token ? '?accessToken=' + encodeURIComponent(token) : '')
 }
 
 /** 机器人和全部设备摘要，页面用它读取 8 路摄像头和麦克风的真实状态。 */
@@ -151,4 +133,19 @@ export function moveInspectionLift(action) {
 /** 检测升降停止使用急停通道：robot-core 会同时停止运动和升降设备。 */
 export function stopInspectionLift() {
   return emergencyStop({ traceId: createId('trace-estop'), reason: 'operator_pressed_lift_stop' })
+}
+
+export function getInspectionFiles(taskRunId) {
+  return request({ url: '/api/v1/inspections/' + encodeURIComponent(taskRunId) + '/files', method: 'get' })
+}
+
+export async function downloadInspectionFile(taskRunId, name) {
+  const response = await request({ url: '/api/v1/inspections/' + encodeURIComponent(taskRunId) + '/files/' + encodeURIComponent(name),
+    method: 'get', responseType: 'blob', timeout: 0 })
+  const url = URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
