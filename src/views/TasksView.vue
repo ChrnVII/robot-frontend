@@ -1,6 +1,8 @@
 <script setup>
 // 任务管理：巡检计划的增删改查与立即执行。
 // 列表数据、字段枚举、CRON 校验都来自 api/tasks.js，页面只负责交互。
+// 筛选与分页走服务端：改造前是拉全量再在浏览器 filter + slice，
+// 任务与告警涨到几千条时首屏会明显变慢。
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { Delete, Plus, Refresh, RefreshRight, Search, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -8,17 +10,17 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncSection from '@/components/AsyncSection.vue'
 import DataTable from '@/components/DataTable.vue'
 import {
-  RUN_TYPE_OPTIONS, createTaskDraft, deleteTask, isValidCron, listTasks, runTask, saveTask
+  RUN_TYPE_OPTIONS, createTaskDraft, deleteTask, fetchTasksPage, isValidCron, runTask, saveTask
 } from '@/api/tasks'
-import { useAsyncData } from '@/composables/useAsyncData'
+import { useServerTable } from '@/composables/useServerTable'
 import { useAsyncTask } from '@/composables/useAsyncTask'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 import { formatTime } from '@/utils/format'
 
 const keyword = ref('')
 const enabledFilter = ref('')
-const page = ref(1)
-const pageSize = ref(10)
 const expanded = ref([])
+const enabledTotal = ref(0)
 
 const dialogVisible = ref(false)
 const editing = ref(false)
@@ -26,7 +28,11 @@ const draft = reactive(createTaskDraft())
 const draftRef = ref(null)
 
 const { pendingKey, run } = useAsyncTask()
-const { data: rows, loading, error, load } = useAsyncData(() => listTasks(), { initialData: [] })
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
+
+const {
+  rows, total, page, pageSize, loading, error, load, search, reload, setPage, setPageSize
+} = useServerTable(fetchTasksPage, { pageSize: 10 })
 
 const columns = [
   { prop: 'taskName', label: '任务名称', minWidth: 180, fixed: 'left' },
@@ -52,28 +58,34 @@ const rules = {
   route: [{ required: true, message: '请输入任务站点序列', trigger: 'blur' }]
 }
 
-const filteredRows = computed(() => {
-  const text = keyword.value.trim().toLowerCase()
-  return (rows.value || []).filter((row) => {
-    const matchesText = !text
-      || String(row.taskName || '').toLowerCase().includes(text)
-      || String(row.taskId || '').toLowerCase().includes(text)
-    const matchesEnabled = enabledFilter.value === ''
-      || (enabledFilter.value === 'on' ? row.enabled !== false : row.enabled === false)
-    return matchesText && matchesEnabled
-  })
+const headerDescription = computed(() => {
+  const scope = keyword.value || enabledFilter.value ? '筛选结果' : '全部'
+  return `${scope} ${total.value} 个巡检任务 · 已启用 ${enabledTotal.value} 个`
 })
 
-const pagedRows = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filteredRows.value.slice(start, start + pageSize.value)
+// 输入防抖：逐字触发请求没有意义，300ms 内的连续输入合并成一次。
+let filterTimer = null
+watch([keyword, enabledFilter], () => {
+  if (filterTimer) window.clearTimeout(filterTimer)
+  filterTimer = window.setTimeout(() => {
+    search({ keyword: keyword.value, enabled: enabledFilter.value })
+  }, 300)
 })
 
-const enabledCount = computed(() => (rows.value || []).filter((row) => row.enabled !== false).length)
+onMounted(async () => {
+  await load()
+  await refreshEnabledTotal()
+})
 
-watch([keyword, enabledFilter], () => { page.value = 1 })
-
-onMounted(load)
+/** 已启用数量是全局口径（不受当前筛选影响），单独取一次 total。 */
+async function refreshEnabledTotal() {
+  try {
+    const result = await fetchTasksPage({ enabled: 'on', page: 1, pageSize: 1 })
+    enabledTotal.value = result.total
+  } catch {
+    enabledTotal.value = 0
+  }
+}
 
 function openCreate() {
   editing.value = false
@@ -94,7 +106,8 @@ async function submitDraft() {
   const result = await run('save', () => saveTask({ ...draft }), { success: editing.value ? '任务已更新' : '任务已创建' })
   if (result === undefined) return
   dialogVisible.value = false
-  await load()
+  await reload()
+  await refreshEnabledTotal()
 }
 
 async function removeTask(row) {
@@ -109,7 +122,8 @@ async function removeTask(row) {
   }
   const result = await run(`delete-${row.taskId}`, () => deleteTask(row.taskId), { success: '任务已删除' })
   if (result === undefined) return
-  await load()
+  await reload()
+  await refreshEnabledTotal()
 }
 
 async function executeTask(row) {
@@ -125,18 +139,18 @@ async function executeTask(row) {
   await run(`run-${row.taskId}`, () => runTask(row.taskId), { success: `任务「${row.taskName || row.taskId}」已下发执行` })
 }
 
-function toggleEnabled(row) {
+async function toggleEnabled(row) {
   const next = !(row.enabled !== false)
-  return run(`toggle-${row.taskId}`, () => saveTask({ ...row, enabled: next }), {
+  const result = await run(`toggle-${row.taskId}`, () => saveTask({ ...row, enabled: next }), {
     success: next ? '任务已开启' : '任务已关闭',
     silentError: true
-  }).then((result) => {
-    if (result === undefined) {
-      ElMessage.error('发布状态修改失败')
-      return
-    }
-    row.enabled = next
   })
+  if (result === undefined) {
+    ElMessage.error('发布状态修改失败')
+    return
+  }
+  row.enabled = next
+  await refreshEnabledTotal()
 }
 
 function resetFilters() {
@@ -145,24 +159,24 @@ function resetFilters() {
 }
 
 async function refresh() {
-  await load()
-  if (!error.value) ElMessage.success('任务列表已刷新')
+  await refreshWithFeedback(async () => {
+    const ok = await reload()
+    await refreshEnabledTotal()
+    return ok && !error.value
+  }, { success: '任务列表已刷新', isError: () => error.value })
 }
 </script>
 
 <template>
   <div class="view">
-    <PageHeader
-      title="任务管理"
-      :description="`共 ${rows.length} 个巡检任务 · 已启用 ${enabledCount} 个`"
-    >
+    <PageHeader title="任务管理" :description="headerDescription">
       <template #extra>
         <el-button :icon="Refresh" :loading="loading" @click="refresh">刷新</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">新建任务</el-button>
       </template>
     </PageHeader>
 
-    <AsyncSection :loading="loading" :error="error" loading-text="正在加载任务列表…" @retry="load">
+    <AsyncSection :loading="loading && !rows.length" :error="error" loading-text="正在加载任务列表…" @retry="load">
       <section class="view-panel">
         <div class="view-toolbar">
           <div class="view-toolbar__actions">
@@ -179,19 +193,29 @@ async function refresh() {
             </el-select>
             <el-button text :icon="RefreshRight" @click="resetFilters">重置</el-button>
           </div>
-          <span class="view-toolbar__hint">筛选结果 {{ filteredRows.length }} 条</span>
+          <span class="view-toolbar__hint">共 {{ total }} 条</span>
         </div>
 
         <DataTable
-          v-model:page="page"
-          v-model:page-size="pageSize"
-          :rows="pagedRows"
+          :rows="rows"
           :columns="columns"
           :loading="loading"
           row-key="taskId"
-          :total="filteredRows.length"
+          :page="page"
+          :page-size="pageSize"
+          :total="total"
           empty-text="暂无巡检任务"
+          @page-change="setPage"
+          @size-change="setPageSize"
         >
+          <!-- 空状态带引导动作，而不是只留一句「暂无数据」 -->
+          <template #empty>
+            <el-empty :description="keyword || enabledFilter ? '没有符合筛选条件的任务' : '还没有巡检任务'">
+              <el-button v-if="keyword || enabledFilter" @click="resetFilters">清空筛选</el-button>
+              <el-button v-else type="primary" :icon="Plus" @click="openCreate">新建任务</el-button>
+            </el-empty>
+          </template>
+
           <template #cell-enabled="{ row }">
             <el-switch
               :model-value="row.enabled !== false"
@@ -232,7 +256,7 @@ async function refresh() {
 
         <el-divider content-position="left">任务站点序列</el-divider>
         <el-collapse v-model="expanded">
-          <el-collapse-item v-for="row in pagedRows" :key="row.taskId" :name="row.taskId">
+          <el-collapse-item v-for="row in rows" :key="row.taskId" :name="row.taskId">
             <template #title>
               <strong>{{ row.taskName || row.taskId }}</strong>
               <span class="text-muted route-title">（{{ row.route ? `${row.route.split(',').length} 个点位` : '未配置路线' }}）</span>
@@ -302,5 +326,11 @@ async function refresh() {
 .route-body {
   margin: 0;
   line-height: 1.7;
+}
+
+@media (max-width: 900px) {
+  .filter-search {
+    width: 100%;
+  }
 }
 </style>

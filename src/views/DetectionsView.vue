@@ -7,6 +7,8 @@ import {
 } from '@element-plus/icons-vue'
 import { getPlatformInfo } from '@/api/system'
 import { apiErrorMessage, unwrap } from '@/api/envelope'
+import { listCameras } from '@/api/cameras'
+import PageHeader from '@/components/PageHeader.vue'
 import {
   captureMedia, getDetections, getInspectionConfig, getInspectionImageUrl,
   getInspectionStatus, getInspectionStreamUrl, getRobotState, moveInspectionLift, startInspection,
@@ -48,11 +50,15 @@ const CAMERA_LAYOUTS = [
 ]
 const LAYOUT_BY_MODE = { single: SINGLE_LAYOUT, four: CAMERA_LAYOUTS[1], eight: CAMERA_LAYOUTS[2] }
 
-// 八路巡检通道是机器人固定的设备拓扑，通道状态一律以后端设备接口为准。
-const CAMERA_CHANNELS = Array.from({ length: 8 }, (_, index) => {
-  const code = String(index + 1).padStart(2, '0')
-  return { id: `cam${code}`, label: `摄像头 ${code}` }
-})
+// 巡检通道以后端相机目录为准（GET /cameras）；接口不可用时回退到固定 8 路，
+// 保证没有平台 YAML 的开发环境也能打开页面。
+const FALLBACK_CAMERA_COUNT = 8
+function defaultCameraChannels(count = FALLBACK_CAMERA_COUNT) {
+  return Array.from({ length: count }, (_, index) => {
+    const code = String(index + 1).padStart(2, '0')
+    return { id: `cam${code}`, label: `摄像头 ${code}`, selected: false }
+  })
+}
 const ACTIVE_INSPECTION_KEY = 'inspection-robot.active-inspection'
 const SELECTED_CAMERAS_KEY = 'inspection-robot.selected-cameras'
 const LAYOUT_KEY = 'inspection-robot.detection-layout'
@@ -62,7 +68,9 @@ const DEVICE_STATE_INTERVAL = 15000
 const RESULT_PAGE_SIZE = 24
 const STREAM_MAX_ATTEMPTS = 4
 
-const cameras = reactive(CAMERA_CHANNELS.map((channel) => ({ ...channel, selected: false })))
+const cameras = reactive(defaultCameraChannels())
+// 相机目录来源：config（后端 YAML）| fallback（内置 8 路）
+const cameraDirectorySource = ref('fallback')
 const deviceStates = ref({})
 const deviceStatesReady = ref(false)
 const deviceStatesError = ref('')
@@ -314,8 +322,9 @@ function resolveDeviceState(deviceId) {
 function cameraDescription(camera) {
   const state = resolveDeviceState(camera.id)
   if (!state) {
-    if (deviceStatesReady.value) return '后端未上报该通道状态'
-    return deviceStatesError.value || '状态读取中…'
+    if (!deviceStatesReady.value) return deviceStatesError.value || '状态读取中…'
+    // 通道来自相机目录时，robot-core 本来就不会上报每路状态，这不算异常
+    return cameraDirectorySource.value === 'fallback' ? '后端未上报该通道状态' : '已配置 · 暂无状态上报'
   }
   const parts = []
   if (state.health) parts.push(HEALTH_LABELS[state.health] || state.health)
@@ -335,6 +344,26 @@ async function loadDeviceStates() {
   } catch (error) {
     deviceStatesReady.value = false
     deviceStatesError.value = apiErrorMessage(error, '设备状态读取失败')
+  }
+}
+
+// 相机目录决定页面展示哪几路通道：编号与标签都以后端为准，前端不再假设一定是 8 路 cam01…cam08。
+async function loadCameraDirectory() {
+  try {
+    const payload = unwrap(await listCameras(), {})
+    const rows = Array.isArray(payload?.cameras) ? payload.cameras : []
+    const inspection = rows.filter((row) => row?.id && row.kind === 'inspection' && row.enabled !== false)
+    if (!inspection.length) return
+    const selectedIds = cameras.filter((camera) => camera.selected).map((camera) => camera.id)
+    cameras.splice(0, cameras.length, ...inspection.map((row) => ({
+      id: String(row.id),
+      label: row.label || String(row.id),
+      selected: false
+    })))
+    applyCameraSelection(selectedIds.filter((id) => cameras.some((camera) => camera.id === id)))
+    cameraDirectorySource.value = payload?.source || 'config'
+  } catch {
+    // 目录接口不可用（未配置平台 YAML / 旧后端）时保留内置 8 路，页面照常可用
   }
 }
 
@@ -428,13 +457,13 @@ function selectLayout(layout) {
   if (!target) return
   layoutView.value = target.id
   persistLayout(target.id)
-  const ids = CAMERA_CHANNELS.slice(0, target.count).map((channel) => channel.id)
+  const ids = cameras.slice(0, target.count).map((channel) => channel.id)
   const changed = ids.filter((id) => !cameras.find((camera) => camera.id === id)?.selected).length
   applyCameraSelection(ids)
   persistCameraSelection()
   setResultIndexForCamera(ids[0])
   resetCameraResults()
-  if (changed) ElMessage.info(`已自动勾选前 ${target.count} 路通道，可按需调整`)
+  if (changed) ElMessage.info(`已自动勾选前 ${ids.length} 路通道，可按需调整`)
 }
 
 // 用户手动勾选后，选中的通道数决定后端 mode；4 / 8 路会切换对应的网格排版。
@@ -774,13 +803,31 @@ async function restoreActiveInspection() {
   }
 }
 
+// 页面不可见时暂停轮询（巡检状态 2.5s、设备状态 15s）：
+// 后台标签页没人看，反复请求只是给后端和 IPC 添负担；回到前台立刻补一次。
+function handleVisibility() {
+  if (document.hidden) {
+    stopPolling()
+    if (deviceTimer) {
+      window.clearInterval(deviceTimer)
+      deviceTimer = null
+    }
+    return
+  }
+  if (isRunning.value) startPolling()
+  if (!deviceTimer) deviceTimer = window.setInterval(loadDeviceStates, DEVICE_STATE_INTERVAL)
+  loadDeviceStates()
+}
+
 onMounted(() => {
   loadDeviceStates()
+  loadCameraDirectory()
   loadPlatformInfo()
   loadRuntimeConfig()
   restoreActiveInspection()
   deviceTimer = window.setInterval(loadDeviceStates, DEVICE_STATE_INTERVAL)
   window.addEventListener('keydown', handleKeydown)
+  document.addEventListener('visibilitychange', handleVisibility)
   handleViewportChange()
   window.addEventListener('resize', handleViewportChange)
   if (typeof ResizeObserver !== 'undefined') {
@@ -795,6 +842,7 @@ onBeforeUnmount(() => {
   closeStream()
   if (deviceTimer) window.clearInterval(deviceTimer)
   window.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('visibilitychange', handleVisibility)
   window.removeEventListener('resize', handleViewportChange)
   if (panelResizeObserver) {
     panelResizeObserver.disconnect()
@@ -805,6 +853,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="detection-view">
+    <!-- 本页此前直接以卡片开场，没有标题栏，跟其他 10 个页面不是一套版式 -->
+    <PageHeader
+      title="智能检测"
+      :description="`${modeLabel} · ${selectedCameras.length} / ${cameras.length} 路通道已启用`"
+      :status-text="stateLabel"
+      :status-type="stateTag"
+    />
+
     <div class="panel-row">
       <!-- 参与检测的摄像头与音频、升降输入 -->
       <el-card ref="inputPanelRef" class="panel" shadow="never">
@@ -1250,26 +1306,18 @@ onBeforeUnmount(() => {
 .detection-view {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--app-gap);
 }
 
 .panel-row {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  gap: 20px;
+  gap: var(--app-gap);
   align-items: start;
 }
 
-.panel :deep(.el-card__header) {
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-
-.panel :deep(.el-card__body) {
-  padding: 20px;
-}
-
-/* 02 运行配置：高度跟随左侧卡片，表单区内部滚动，操作按钮固定在卡片底部 */
+/* 卡片内外边距统一交给 assets/main.css 的 .el-card 规则，
+   这里只保留本页特有的布局约束（不再单独写 14px/20px，避免同屏两套卡片）。 */
 .panel--config {
   display: flex;
   flex-direction: column;
@@ -1521,10 +1569,6 @@ onBeforeUnmount(() => {
   margin-top: 12px;
 }
 
-.config-form :deep(.el-form-item) {
-  margin-bottom: 16px;
-}
-
 /* 名称与控件横向排列：标签固定宽度、与控件首行垂直居中，控件紧随其后不再另起一行 */
 .config-form :deep(.el-form-item__label) {
   padding: 0 12px 0 0;
@@ -1576,13 +1620,13 @@ onBeforeUnmount(() => {
 }
 
 .results-alert {
-  margin-bottom: 16px;
+  margin-bottom: var(--app-gap-inner);
 }
 
 .results-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-  gap: 20px;
+  gap: var(--app-gap);
 }
 
 .result-preview {

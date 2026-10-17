@@ -1,23 +1,29 @@
 <script setup>
-// 运行数据：任务执行记录列表 + 断点续跑 + 删除记录。
+// 运行数据：服务端筛选 / 分页 + 断点续跑 + 删除记录。
 import { computed, onMounted, ref, watch } from 'vue'
 import { Delete, Refresh, RefreshRight, Search, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncSection from '@/components/AsyncSection.vue'
 import DataTable from '@/components/DataTable.vue'
-import { canResumeRun, deleteRun, listRuns, resumeRun, runStatusLabel, runStatusTagType } from '@/api/runs'
-import { useAsyncData } from '@/composables/useAsyncData'
+import {
+  canResumeRun, deleteRun, fetchRunsPage, resumeRun, runStatusLabel, runStatusTagType
+} from '@/api/runs'
+import { useServerTable } from '@/composables/useServerTable'
 import { useAsyncTask } from '@/composables/useAsyncTask'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 import { formatTime } from '@/utils/format'
 
 const keyword = ref('')
 const statusFilter = ref('')
-const page = ref(1)
-const pageSize = ref(10)
+const interruptedTotal = ref(0)
 
 const { pendingKey, run } = useAsyncTask()
-const { data: rows, loading, error, load } = useAsyncData(() => listRuns(), { initialData: [] })
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
+
+const {
+  rows, total, page, pageSize, loading, error, load, search, reload, setPage, setPageSize
+} = useServerTable(fetchRunsPage, { pageSize: 10 })
 
 const columns = [
   { prop: 'taskRunId', label: '执行 ID', minWidth: 180, fixed: 'left', slot: 'id' },
@@ -31,26 +37,33 @@ const columns = [
   { prop: 'actions', label: '操作', width: 160, fixed: 'right', slot: 'actions' }
 ]
 
-const filteredRows = computed(() => {
-  const text = keyword.value.trim().toLowerCase()
-  return (rows.value || []).filter((row) => {
-    const matchesText = !text
-      || String(row.taskRunId || '').toLowerCase().includes(text)
-      || String(row.taskId || '').toLowerCase().includes(text)
-    const matchesStatus = statusFilter.value === '' || Number(row.status) === Number(statusFilter.value)
-    return matchesText && matchesStatus
-  })
+const headerDescription = computed(() => {
+  const scope = keyword.value || statusFilter.value !== '' ? '筛选结果' : '全部'
+  return `${scope} ${total.value} 条执行记录 · 中断 ${interruptedTotal.value} 条`
 })
 
-const pagedRows = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filteredRows.value.slice(start, start + pageSize.value)
+let filterTimer = null
+watch([keyword, statusFilter], () => {
+  if (filterTimer) window.clearTimeout(filterTimer)
+  filterTimer = window.setTimeout(() => {
+    search({ keyword: keyword.value, status: statusFilter.value })
+  }, 300)
 })
 
-const interruptedCount = computed(() => (rows.value || []).filter((row) => Number(row.status) === 100).length)
+onMounted(async () => {
+  await load()
+  await refreshInterruptedTotal()
+})
 
-watch([keyword, statusFilter], () => { page.value = 1 })
-onMounted(load)
+/** 中断数是全局口径，分页后本地没有全量数据，单独取一次 total。 */
+async function refreshInterruptedTotal() {
+  try {
+    const result = await fetchRunsPage({ status: 100, page: 1, pageSize: 1 })
+    interruptedTotal.value = result.total
+  } catch {
+    interruptedTotal.value = 0
+  }
+}
 
 function routePreview(route) {
   const text = String(route || '')
@@ -69,7 +82,9 @@ async function resume(row) {
     return
   }
   const result = await run(`resume-${row.taskRunId}`, () => resumeRun(row.taskRunId), { success: `执行 ${row.taskRunId} 已续跑` })
-  if (result !== undefined) await load()
+  if (result === undefined) return
+  await reload()
+  await refreshInterruptedTotal()
 }
 
 async function remove(row) {
@@ -83,12 +98,17 @@ async function remove(row) {
     return
   }
   const result = await run(`delete-${row.taskRunId}`, () => deleteRun(row.taskRunId), { success: '执行记录已删除' })
-  if (result !== undefined) await load()
+  if (result === undefined) return
+  await reload()
+  await refreshInterruptedTotal()
 }
 
 async function refresh() {
-  await load()
-  if (!error.value) ElMessage.success('运行记录已刷新')
+  await refreshWithFeedback(async () => {
+    const ok = await reload()
+    await refreshInterruptedTotal()
+    return ok && !error.value
+  }, { success: '运行记录已刷新', isError: () => error.value })
 }
 
 function resetFilters() {
@@ -99,16 +119,13 @@ function resetFilters() {
 
 <template>
   <div class="view">
-    <PageHeader
-      title="运行数据"
-      :description="`共 ${rows.length} 条执行记录 · 中断 ${interruptedCount} 条`"
-    >
+    <PageHeader title="运行数据" :description="headerDescription">
       <template #extra>
         <el-button :icon="Refresh" :loading="loading" @click="refresh">刷新</el-button>
       </template>
     </PageHeader>
 
-    <AsyncSection :loading="loading" :error="error" loading-text="正在加载运行记录…" @retry="load">
+    <AsyncSection :loading="loading && !rows.length" :error="error" loading-text="正在加载运行记录…" @retry="load">
       <section class="view-panel">
         <div class="view-toolbar">
           <div class="view-toolbar__actions">
@@ -121,18 +138,20 @@ function resetFilters() {
             </el-select>
             <el-button text :icon="RefreshRight" @click="resetFilters">重置</el-button>
           </div>
-          <span class="view-toolbar__hint">筛选结果 {{ filteredRows.length }} 条</span>
+          <span class="view-toolbar__hint">共 {{ total }} 条</span>
         </div>
 
         <DataTable
-          v-model:page="page"
-          v-model:page-size="pageSize"
-          :rows="pagedRows"
+          :rows="rows"
           :columns="columns"
           :loading="loading"
           row-key="taskRunId"
-          :total="filteredRows.length"
+          :page="page"
+          :page-size="pageSize"
+          :total="total"
           empty-text="暂无执行记录"
+          @page-change="setPage"
+          @size-change="setPageSize"
         >
           <template #cell-id="{ row }">
             <span class="text-mono">{{ row.taskRunId }}</span>
@@ -167,7 +186,7 @@ function resetFilters() {
 
         <el-divider content-position="left">执行路线</el-divider>
         <el-scrollbar max-height="220px">
-          <el-descriptions v-for="row in pagedRows" :key="row.taskRunId" :column="1" border size="small" class="run-route">
+          <el-descriptions v-for="row in rows" :key="row.taskRunId" :column="1" border size="small" class="run-route">
             <el-descriptions-item :label="row.taskRunId">
               <span class="text-mono">{{ routePreview(row.route) || '未记录路线' }}</span>
             </el-descriptions-item>
@@ -189,5 +208,11 @@ function resetFilters() {
 
 .run-route + .run-route {
   margin-top: 8px;
+}
+
+@media (max-width: 900px) {
+  .filter-search {
+    width: 100%;
+  }
 }
 </style>

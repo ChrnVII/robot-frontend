@@ -1,9 +1,9 @@
 // 告警数据接口层。
-//   GET    /api/v1/alerts                告警列表
+//   GET    /api/v1/alerts                告警列表（支持 page/pageSize/keyword/level/status）
 //   POST   /api/v1/alerts/{alertId}      登记处理结果
 //   DELETE /api/v1/alerts/{alertId}      删除告警
 import request from '@/utils/request'
-import { unwrapRows } from './envelope'
+import { unwrapPage, unwrapRows } from './envelope'
 
 export const ALERT_LEVELS = [
   { value: 'info', label: '提示', tag: 'info' },
@@ -29,6 +29,17 @@ export function alertStatusMeta(status) {
 
 export async function listAlerts(params = {}) {
   return unwrapRows(await request({ url: '/api/v1/alerts', method: 'get', params }), [])
+}
+
+/** 服务端分页 + 筛选：返回 { rows, total }。筛选与分页都由后端完成。 */
+export async function fetchAlertsPage(params = {}) {
+  return unwrapPage(await request({ url: '/api/v1/alerts', method: 'get', params }))
+}
+
+/** 待处理告警数量：只取一页一条，用 total 拿数，不把整表拉到前端。 */
+export async function countOpenAlerts() {
+  const { total } = await fetchAlertsPage({ status: 'open', page: 1, pageSize: 1 })
+  return total
 }
 
 /** 登记处理结果：状态 + 处理说明。 */

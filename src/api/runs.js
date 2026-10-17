@@ -1,9 +1,9 @@
 // 运行数据接口层：任务执行记录与断点续跑。
-//   GET    /api/v1/runs                    执行记录列表
+//   GET    /api/v1/runs                    执行记录列表（支持 page/pageSize/keyword/status）
 //   POST   /api/v1/runs/{taskRunId}/resume 断点续跑
 //   DELETE /api/v1/runs/{taskRunId}        删除执行记录
 import request from '@/utils/request'
-import { unwrapRows } from './envelope'
+import { unwrapPage, unwrapRows } from './envelope'
 
 export const RUN_STATUS_LABELS = {
   1: '执行中',
@@ -33,6 +33,11 @@ export function canResumeRun(run) {
 
 export async function listRuns(params = {}) {
   return unwrapRows(await request({ url: '/api/v1/runs', method: 'get', params }), [])
+}
+
+/** 服务端分页 + 筛选：返回 { rows, total }。 */
+export async function fetchRunsPage(params = {}) {
+  return unwrapPage(await request({ url: '/api/v1/runs', method: 'get', params }))
 }
 
 export function resumeRun(taskRunId, payload = {}) {

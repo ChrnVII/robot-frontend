@@ -28,6 +28,21 @@ export function unwrapRows(response, fallback = []) {
   return fallback
 }
 
+/**
+ * 分页列表接口取值：兼容 {rows,total,page,pageSize} 与直接返回数组两种形态。
+ * 后端 `page` 缺省时仍返回数组（旧契约），因此两种形态都要能吃。
+ */
+export function unwrapPage(response, fallback = { rows: [], total: 0 }) {
+  const body = unwrap(response, null)
+  if (Array.isArray(body)) return { rows: body, total: body.length }
+  const rows = unwrapRows(response, fallback.rows)
+  const total = Number(body?.total)
+  return {
+    rows,
+    total: Number.isFinite(total) ? total : rows.length
+  }
+}
+
 export function apiErrorMessage(error, fallback = '请求失败') {
   const body = error?.response?.data
   if (body?.message) return body.code ? `${body.message}（${body.code}）` : body.message

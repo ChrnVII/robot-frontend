@@ -1,6 +1,7 @@
 <script setup>
 // 地图站点：可编辑站点表格，整张地图一次性保存（带版本号，避免双人互相覆盖）。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { Delete, Plus, Refresh, Select } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
@@ -9,16 +10,27 @@ import { STATION_TYPES, createStation, listStations, saveStations, stationTypeLa
 import { unwrap } from '@/api/envelope'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useAsyncTask } from '@/composables/useAsyncTask'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 
 const stations = ref([])
 const mapVersion = ref(1)
-const dirty = ref(false)
+// 保存服务端快照的序列化结果：dirty 由「当前值 vs 快照」实时比对得出，
+// 比手写 markDirty() 更准——用户改了又改回去，不应该还提示"有未保存修改"。
+const snapshot = ref('[]')
 const { pendingKey, run } = useAsyncTask()
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
+
+function serialize(rows) {
+  return JSON.stringify(rows)
+}
+
+const dirty = computed(() => serialize(stations.value) !== snapshot.value)
 
 const { loading, error, load } = useAsyncData(async () => {
   const rows = await listStations()
-  stations.value = rows.map((row, index) => ({ ...createStation(index + 1), ...row }))
-  dirty.value = false
+  const next = rows.map((row, index) => ({ ...createStation(index + 1), ...row }))
+  stations.value = next
+  snapshot.value = serialize(next)
   return rows
 })
 
@@ -37,16 +49,41 @@ const booleanColumns = [
   { prop: 'recordAudio', label: '录音' }
 ]
 
-onMounted(load)
-
-function markDirty() {
-  dirty.value = true
+// 关闭标签页 / 刷新浏览器时的原生提示：路由守卫管不到这一层。
+function handleBeforeUnload(event) {
+  if (!dirty.value) return
+  event.preventDefault()
+  // 旧版浏览器需要 returnValue 才会弹确认框
+  event.returnValue = ''
 }
+
+onMounted(() => {
+  load()
+  window.addEventListener('beforeunload', handleBeforeUnload)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+})
+
+// 页内跳转拦截：改造前改完整张地图切个页面就全丢了，且没有任何提示。
+onBeforeRouteLeave(async () => {
+  if (!dirty.value) return true
+  try {
+    await ElMessageBox.confirm(
+      '地图站点有未保存的修改，离开后这些修改会丢失。',
+      '有未保存的修改',
+      { type: 'warning', confirmButtonText: '放弃修改并离开', cancelButtonText: '留在本页' }
+    )
+    return true
+  } catch {
+    return false
+  }
+})
 
 function addStation() {
   const nextIndex = stations.value.length + 1
   stations.value.push(createStation(nextIndex))
-  markDirty()
 }
 
 async function removeStation(index) {
@@ -61,7 +98,6 @@ async function removeStation(index) {
     return
   }
   stations.value.splice(index, 1)
-  markDirty()
 }
 
 async function save() {
@@ -80,12 +116,17 @@ async function save() {
     if (payload.mapVersion) mapVersion.value = payload.mapVersion
     return payload
   }, { success: '地图站点保存成功' })
-  if (result !== undefined) dirty.value = false
+  if (result !== undefined) {
+    // 保存成功后把当前值作为新快照，dirty 立即归零
+    snapshot.value = serialize(stations.value)
+  }
 }
 
-function reset() {
-  load()
-  ElMessage.info('已恢复为服务端保存的站点数据')
+async function reload() {
+  await refreshWithFeedback(async () => {
+    await load()
+    return !error.value
+  }, { success: '已恢复为服务端保存的站点数据', isError: () => error.value })
 }
 </script>
 
@@ -98,8 +139,16 @@ function reset() {
       :status-type="dirty ? 'warning' : 'success'"
     >
       <template #extra>
-        <el-button :icon="Refresh" :loading="loading" @click="reset">放弃修改</el-button>
-        <el-button type="primary" :icon="Select" :loading="pendingKey === 'save'" @click="save">保存地图</el-button>
+        <el-button :icon="Refresh" :loading="loading" :disabled="!dirty" @click="reload">放弃修改</el-button>
+        <el-button
+          type="primary"
+          :icon="Select"
+          :loading="pendingKey === 'save'"
+          :disabled="!dirty"
+          @click="save"
+        >
+          保存地图
+        </el-button>
       </template>
     </PageHeader>
 
@@ -115,6 +164,16 @@ function reset() {
           <el-button :icon="Plus" @click="addStation">添加站点</el-button>
         </div>
 
+        <!-- 未保存提醒条：滚动到表格上方时也能看到状态 -->
+        <el-alert
+          v-if="dirty"
+          class="map-dirty"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="`有未保存的修改（${stations.length} 个站点）。离开本页或刷新浏览器会丢失。`"
+        />
+
         <el-table :data="stations" border stripe size="default" :row-key="(row) => row.stationId">
           <template #empty>
             <el-empty description="暂无站点，请点击「添加站点」" :image-size="72" />
@@ -123,44 +182,44 @@ function reset() {
           <el-table-column type="index" label="#" width="55" align="center" />
           <el-table-column label="站点" width="90">
             <template #default="{ row }">
-              <el-input-number v-model="row.station" :min="1" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.station" :min="1" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column label="类型" width="120">
             <template #default="{ row }">
-              <el-select v-model="row.type" size="small" @change="markDirty">
+              <el-select v-model="row.type" size="small">
                 <el-option v-for="item in STATION_TYPES" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
             </template>
           </el-table-column>
           <el-table-column label="鸡笼" width="90">
             <template #default="{ row }">
-              <el-input-number v-model="row.cage" :min="0" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.cage" :min="0" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column label="x" width="110">
             <template #default="{ row }">
-              <el-input-number v-model="row.x" :precision="3" :step="0.1" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.x" :precision="3" :step="0.1" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column label="y" width="110">
             <template #default="{ row }">
-              <el-input-number v-model="row.y" :precision="3" :step="0.1" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.y" :precision="3" :step="0.1" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column label="yaw" width="100">
             <template #default="{ row }">
-              <el-input-number v-model="row.yaw" :min="-180" :max="180" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.yaw" :min="-180" :max="180" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column label="下一站点速度" width="130">
             <template #default="{ row }">
-              <el-input-number v-model="row.nextSpeed" :precision="2" :step="0.05" :min="0" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.nextSpeed" :precision="2" :step="0.05" :min="0" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column label="等待(毫秒)" width="130">
             <template #default="{ row }">
-              <el-input-number v-model="row.waitMs" :min="0" :step="500" :controls="false" size="small" class="cell-number" @change="markDirty" />
+              <el-input-number v-model="row.waitMs" :min="0" :step="500" :controls="false" size="small" class="cell-number" />
             </template>
           </el-table-column>
           <el-table-column
@@ -171,7 +230,7 @@ function reset() {
             align="center"
           >
             <template #default="{ row }">
-              <el-switch v-model="row[column.prop]" size="small" @change="markDirty" />
+              <el-switch v-model="row[column.prop]" size="small" />
             </template>
           </el-table-column>
           <el-table-column label="操作" width="80" fixed="right" align="center">
@@ -202,7 +261,11 @@ function reset() {
   text-align: left;
 }
 
+.map-dirty {
+  margin-bottom: var(--app-gap-inner);
+}
+
 .map-tip {
-  margin-top: 14px;
+  margin-top: var(--app-gap-inner);
 }
 </style>

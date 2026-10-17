@@ -1,7 +1,7 @@
 <script setup>
 // 升降控制：参数写入、绝对定位、连续升降和急停。
 // 所有指令都经 api/safety.js 下发（携带控制租约），页面只维护按钮状态和表单值。
-import { computed, onBeforeUnmount, onMounted, reactive } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ArrowDown, ArrowUp, CaretBottom, Refresh, RefreshLeft, VideoPause, Warning } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
@@ -13,7 +13,9 @@ import {
 } from '@/api/safety'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useAsyncTask } from '@/composables/useAsyncTask'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 import { displayNumber } from '@/utils/format'
+import { getErrorMessage } from '@/utils/request'
 
 const STATE_POLL_INTERVAL = 5000
 const ABSOLUTE_PRESETS = [-100, 200, 900]
@@ -34,9 +36,11 @@ const target = reactive({ height: 0 })
 const state = reactive({ height: 0, faultCode: 0, enabled: false, motion: 'idle' })
 
 const { pendingKey, run } = useAsyncTask()
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
 const { loading, error, load } = useAsyncData(() => getLiftState(), { initialData: null, onSuccess: applyState })
 
 let pollTimer = null
+const lastSyncError = ref('')
 
 const motionLabel = computed(() => MOTION_LABELS[state.motion] || state.motion || '未知')
 const heightRange = computed(() => [Number(config.downLimit) || 0, Number(config.upLimit) || 0])
@@ -58,8 +62,12 @@ function applyState(response) {
 async function syncState(silent = true) {
   try {
     applyState(await getLiftState())
+    lastSyncError.value = ''
+    return true
   } catch (reason) {
-    if (!silent) ElMessage.error('升降状态读取失败')
+    lastSyncError.value = getErrorMessage(reason, '升降状态读取失败')
+    if (!silent) ElMessage.error(lastSyncError.value)
+    return false
   }
 }
 
@@ -113,13 +121,45 @@ function toggleEnable() {
   return send('enable', () => enableLift(next), next ? '升降已使能' : '升降已取消使能')
 }
 
+function startPolling() {
+  stopPolling()
+  pollTimer = window.setInterval(() => syncState(), STATE_POLL_INTERVAL)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    window.clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+// 页面不可见时暂停 5s 轮询，回到页面立刻补一次。
+function handleVisibility() {
+  if (document.hidden) {
+    stopPolling()
+    return
+  }
+  syncState()
+  startPolling()
+}
+
+async function refreshStatus() {
+  await refreshWithFeedback(() => syncState(true), {
+    success: '升降状态已刷新',
+    failure: '升降状态读取失败',
+    isError: () => lastSyncError.value
+  })
+}
+
 onMounted(async () => {
   await load()
-  pollTimer = window.setInterval(() => syncState(), STATE_POLL_INTERVAL)
+  startPolling()
+  document.addEventListener('visibilitychange', handleVisibility)
 })
 
 onBeforeUnmount(() => {
-  if (pollTimer) window.clearInterval(pollTimer)
+  stopPolling()
+  document.removeEventListener('visibilitychange', handleVisibility)
 })
 </script>
 
@@ -132,7 +172,7 @@ onBeforeUnmount(() => {
       :status-type="state.enabled ? 'success' : 'info'"
     >
       <template #extra>
-        <el-button :icon="Refresh" :loading="loading" @click="syncState(false)">刷新状态</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="refreshStatus">刷新状态</el-button>
         <el-button
           type="danger"
           :icon="VideoPause"
@@ -263,10 +303,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.lift-metrics {
-  margin-bottom: 16px;
-}
-
 .lift-form {
   max-width: 100%;
 }
@@ -293,6 +329,6 @@ onBeforeUnmount(() => {
 }
 
 .lift-tip {
-  margin-top: 16px;
+  margin-top: var(--app-gap-inner);
 }
 </style>

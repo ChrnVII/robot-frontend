@@ -18,8 +18,11 @@ const emit = defineEmits(['retry'])
 
 <template>
   <div v-if="loading" class="async-section" role="status" aria-live="polite">
-    <el-skeleton :rows="skeletonRows" animated />
-    <p class="async-section__hint">{{ loadingText }}</p>
+    <!-- 页面可通过 #skeleton 提供与真实布局同构的骨架，避免加载完成时高度突变 -->
+    <slot name="skeleton">
+      <el-skeleton :rows="skeletonRows" animated />
+    </slot>
+    <p v-if="loadingText" class="async-section__hint">{{ loadingText }}</p>
   </div>
 
   <template v-else>
@@ -42,15 +45,15 @@ const emit = defineEmits(['retry'])
 <style scoped>
 .async-section {
   padding: 18px;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
 }
 
 .async-section__hint {
   margin: 12px 0 0;
   font-size: 12px;
-  color: var(--el-text-color-secondary);
+  color: var(--app-text-muted);
   text-align: center;
 }
 

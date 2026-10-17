@@ -72,6 +72,18 @@ export function useTelemetry(options = {}) {
     }
   }
 
+  // 页面不可见时停掉 10s 轮询：后台标签页没人看，继续打接口只是浪费。
+  // WebSocket 保持连接（它本来就有断线重连），回到页面时补一次快照再恢复轮询。
+  function handleVisibility() {
+    if (disposed) return
+    if (document.hidden) {
+      stopPolling()
+      return
+    }
+    refresh()
+    startPolling()
+  }
+
   function scheduleReconnect() {
     if (disposed || !realtime || reconnectTimer) return
     const delay = Math.min(1000 * (2 ** reconnectAttempts), MAX_RECONNECT_DELAY)
@@ -120,11 +132,13 @@ export function useTelemetry(options = {}) {
     refresh()
     startPolling()
     connectRealtime()
+    document.addEventListener('visibilitychange', handleVisibility)
   }
 
   function stop() {
     disposed = true
     stopPolling()
+    document.removeEventListener('visibilitychange', handleVisibility)
     if (reconnectTimer) {
       window.clearTimeout(reconnectTimer)
       reconnectTimer = null

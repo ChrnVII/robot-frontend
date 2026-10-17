@@ -711,6 +711,13 @@ export default {
     --green: #16845b;
     --amber: #b36a00;
     --red: #bc3c3c;
+    /* 状态底色：集中成变量，深色模式只换这一层，不必逐条改 1300 行 */
+    --warn-bg: #fff8ef;
+    --warn-border: #f0c9a6;
+    --warn-ink: #70420d;
+    --teal-bg: #f2fbfb;
+    --danger-bg: #fff4f4;
+    --danger-ink: #7f2f2f;
     --shadow: 0 8px 24px rgba(20, 39, 51, 0.07);
 
     min-height: 100%;
@@ -744,18 +751,27 @@ button:disabled {
 /* 未登录遮罩只覆盖右侧内容区，左侧按应用侧边栏宽度让开。
    原写法 inset:0 是相对视口定位的，会连左侧导航一起盖住，
    导致未登录时无法点击侧边栏切换到其他页面。
-   left 的取值与应用外壳 .app-sidebar 的宽度保持一致（见 App.vue）。 */
+   left 跟随 --app-sidebar-width；折叠态由 <html data-sidebar> 切换
+   （见 components/AppSidebar.vue），避免折叠后遮罩仍按 248px 让位。 */
 .auth-mask {
     position: fixed;
     z-index: 20;
     top: 0;
     right: 0;
     bottom: 0;
-    left: 248px;
+    left: var(--app-sidebar-width);
     display: grid;
     place-items: center;
     padding: 20px;
     background: rgba(18, 59, 82, 0.7);
+}
+
+html[data-sidebar="collapsed"] .auth-mask {
+    left: var(--app-sidebar-width-collapsed);
+}
+
+@media (max-width: 900px) {
+    .auth-mask { left: var(--app-sidebar-width-collapsed); }
 }
 
 .auth-card {
@@ -884,10 +900,10 @@ button:disabled {
     gap: 10px;
     padding: 12px 14px;
     margin-bottom: 20px;
-    border: 1px solid #f0c9a6;
+    border: 1px solid var(--warn-border);
     border-left: 4px solid var(--amber);
-    background: #fff8ef;
-    color: #70420d;
+    background: var(--warn-bg);
+    color: var(--warn-ink);
     font-size: 13px;
     line-height: 1.55;
 }
@@ -937,7 +953,7 @@ button:disabled {
     display: block;
     width: 100%;
     text-align: left;
-    background: #fff;
+    background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 4px;
     padding: 13px 14px;
@@ -1051,11 +1067,11 @@ button:disabled {
 .btn-end { background: var(--red); }
 .btn-end:hover:not(:disabled) { background: #963030; }
 .btn-clear {
-    color: #7b4a00;
-    border-color: #d9b06d;
-    background: #fff8eb;
+    color: var(--warn-ink);
+    border-color: var(--warn-border);
+    background: var(--warn-bg);
 }
-.btn-clear:hover:not(:disabled) { background: #fff0d0; }
+.btn-clear:hover:not(:disabled) { filter: brightness(0.97); }
 
 .motion-field label,
 .motion-summary span {
@@ -1072,7 +1088,7 @@ button:disabled {
     border-radius: 4px;
     padding: 0 12px;
     color: var(--ink);
-    background: #fff;
+    background: var(--panel);
     font-size: 18px;
 }
 
@@ -1130,10 +1146,10 @@ button:disabled {
     border: 1px solid var(--line);
     border-radius: 4px;
     color: var(--red);
-    background: #fff;
+    background: var(--panel);
 }
 
-.icon-button:hover:not(:disabled) { background: #fff4f4; }
+.icon-button:hover:not(:disabled) { background: var(--danger-bg); }
 
 .sequence-connector {
     display: flex;
@@ -1172,11 +1188,11 @@ button:disabled {
     border-radius: 4px;
     padding: 0 15px;
     color: var(--teal);
-    background: #fff;
+    background: var(--panel);
     font-weight: 600;
 }
 
-.sequence-add:hover:not(:disabled) { background: #f2fbfb; }
+.sequence-add:hover:not(:disabled) { background: var(--teal-bg); }
 .sequence-actions .control-button { width: 190px; }
 
 .motion-progress {
@@ -1248,7 +1264,7 @@ button:disabled {
     border: 1px solid var(--line);
     border-radius: 4px;
     padding: 12px;
-    background: #fff;
+    background: var(--panel);
 }
 
 .metric-label { color: var(--muted); font-size: 12px; }
@@ -1291,8 +1307,8 @@ button:disabled {
 
 .message.error {
     border-left-color: var(--red);
-    background: #fff4f4;
-    color: #7f2f2f;
+    background: var(--danger-bg);
+    color: var(--danger-ink);
 }
 
 .log {
@@ -1342,5 +1358,37 @@ button:disabled {
     .sequence-actions { align-items: stretch; flex-direction: column; }
     .sequence-actions .control-button, .sequence-add { width: 100%; min-height: 44px; }
     .panel-body { padding: 14px; }
+}
+
+/* ------------------------------ 深色模式 ---------------------------------
+   本页自有一套 --ink / --paper / --panel 变量体系，只要在 html.dark 下
+   换一套取值，上面千余行样式会自动跟随，不需要逐条改写。
+   注意 --navy 同时被用作顶栏背景和标题文字色，文字处单独提到 --ink。 */
+html.dark .track-page {
+    --ink: #e8eef5;
+    --muted: #94a3b3;
+    --line: #2b3542;
+    --paper: #0f1319;
+    --panel: #161c24;
+    --navy: #16283a;
+    --teal: #4fb8c4;
+    --green: #4ec27e;
+    --amber: #e0a044;
+    --red: #f0736f;
+    --warn-bg: #2a2318;
+    --warn-border: #5b4726;
+    --warn-ink: #e8c88a;
+    --teal-bg: #12262a;
+    --danger-bg: #2a1a1c;
+    --danger-ink: #f2a6a2;
+    --shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+
+html.dark .auth-card h2 {
+    color: var(--ink);
+}
+
+html.dark .auth-mask {
+    background: rgb(6 10 14 / 78%);
 }
 </style>

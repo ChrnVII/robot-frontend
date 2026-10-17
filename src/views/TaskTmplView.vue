@@ -9,6 +9,7 @@ import AsyncSection from '@/components/AsyncSection.vue'
 import { LIGHT_MODE_OPTIONS, deleteTaskTemplate, listTaskTemplates, saveTaskTemplate } from '@/api/tasks'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useAsyncTask } from '@/composables/useAsyncTask'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 
 const TASK_MODE_OPTIONS = [
   { value: 0, label: '正常' },
@@ -17,6 +18,7 @@ const TASK_MODE_OPTIONS = [
 
 const selected = ref([])
 const { pendingKey, run } = useAsyncTask()
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
 const { data: rows, loading, error, load } = useAsyncData(() => listTaskTemplates(), { initialData: [] })
 
 const selectedCount = computed(() => selected.value.length)
@@ -84,8 +86,10 @@ async function removeSelected() {
 }
 
 async function refresh() {
-  await load()
-  if (!error.value) ElMessage.success('默认任务已刷新')
+  await refreshWithFeedback(async () => {
+    await load()
+    return !error.value
+  }, { success: '默认任务已刷新', isError: () => error.value })
 }
 </script>
 

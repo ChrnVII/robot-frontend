@@ -7,7 +7,7 @@
 //   POST   /api/v1/task-templates        新增或更新模板
 //   DELETE /api/v1/task-templates/{id}   删除模板
 import request from '@/utils/request'
-import { unwrapRows } from './envelope'
+import { unwrapPage, unwrapRows } from './envelope'
 import { sendDeviceCommand } from './safety'
 
 export const LIGHT_MODE_OPTIONS = [
@@ -49,6 +49,11 @@ export function isValidCron(cron) {
 
 export async function listTasks(params = {}) {
   return unwrapRows(await request({ url: '/api/v1/tasks', method: 'get', params }), [])
+}
+
+/** 服务端分页 + 筛选：返回 { rows, total }。 */
+export async function fetchTasksPage(params = {}) {
+  return unwrapPage(await request({ url: '/api/v1/tasks', method: 'get', params }))
 }
 
 export function saveTask(task) {

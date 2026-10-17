@@ -213,17 +213,3 @@ export function ptzContinuous(direction, speed = 1) {
 export function rebootCamera(presetId) {
   return sendDeviceCommand('camera', 'camera.reboot', { preset: Number(presetId) })
 }
-
-export function cameraSnapshot(presetId, taskRunId = '') {
-  return request({
-    url: '/api/v1/media/captures',
-    method: 'post',
-    data: {
-      taskRunId: taskRunId || null,
-      waypointId: String(presetId ?? 'manual'),
-      deviceId: 'camera',
-      mediaType: 'image',
-      parameters: presetId === undefined || presetId === null ? {} : { preset: Number(presetId) }
-    }
-  })
-}

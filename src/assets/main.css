@@ -1,42 +1,254 @@
-:root { --ink:#303133; --muted:#909399; --line:#e4e7ed; --soft:#f5f7fa; --panel:#fff; --primary:#409eff; --primary-dark:#337ecc; --danger:#f56c6c; }
-*, *::before, *::after { box-sizing:border-box; margin:0; font-weight:normal; }
-html, body, #app { height:100%; }
-body { min-height:100vh; margin:0; background:#f5f7fa; color:var(--ink); font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif; line-height:1.6; text-rendering:optimizeLegibility; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
-a { color:inherit; text-decoration:none; }
+/* ============================================================================
+ * 全局设计令牌与基础样式
+ * ----------------------------------------------------------------------------
+ * 约定：
+ * 1. 所有颜色走 CSS 变量，禁止在组件里写死 #fff / #606266 这类色值，
+ *    否则深色模式必然出现「白底白字」。
+ * 2. 字重不再做全局重置：此前 `* { font-weight: normal }` 把 Element Plus
+ *    自身的语义字重全部压平，再靠各处 font-weight:700 补救，属于反模式。
+ * 3. 字体只用真实可用的系统字体栈：此前声明的 Inter / JetBrains Mono 既没有
+ *    加载也无法命中（内网部署不引外链字体），实际一直是回落字体。
+ * ========================================================================== */
 
-/* 业务页通用版式：每个页面外层都是「标题栏 + 若干面板」。 */
+:root {
+  /* ---------- 表面与描边 ---------- */
+  --app-bg: #f4f6f9;
+  --app-surface: #ffffff;
+  --app-surface-2: #f8fafc;
+  --app-surface-3: #eef2f6;
+  --app-border: #e3e8ee;
+  --app-border-strong: #d3dae2;
+
+  /* ---------- 文字（对白底均 ≥ 4.5:1，满足 WCAG AA） ---------- */
+  --app-text: #1c2530;
+  --app-text-secondary: #55616f;
+  --app-text-muted: #6f7c8a;
+  --app-text-inverse: #ffffff;
+
+  /* ---------- 主色（比 EP 默认 #409eff 深一档，白字对比度 4.6:1） ---------- */
+  --app-primary: #1d6fd8;
+
+  /* ---------- 语义色 ---------- */
+  --app-success: #2f9e5f;
+  --app-warning: #c97b12;
+  --app-danger: #d64545;
+
+  /* ---------- 圆角与阴影 ---------- */
+  --app-radius-sm: 6px;
+  --app-radius: 10px;
+  --app-radius-lg: 14px;
+  --app-shadow-sm: 0 1px 2px rgb(16 24 40 / 4%);
+  --app-shadow: 0 2px 8px rgb(16 24 40 / 6%);
+  --app-shadow-lg: 0 12px 32px rgb(16 24 40 / 12%);
+
+  /* ---------- 间距 ----------
+     卡片（面板）之间统一走 --app-gap，卡片内部的网格/块之间走 --app-gap-inner。
+     页面里不要再给卡片写 margin：.view 的 flex gap 已经负责间距，
+     margin 会与 gap 叠加，这正是之前各页 16/20/24 混着来的原因。 */
+  --app-gap: 12px;
+  --app-gap-inner: 10px;
+
+  /* ---------- 尺寸 ---------- */
+  --app-sidebar-width: 244px;
+  /* 折叠态再收窄一档：只是容得下 28px 品牌图标 + 骑在边上的折叠按钮 */
+  --app-sidebar-width-collapsed: 76px;
+  --app-page-gutter: 28px;
+
+  /* ---------- 侧栏（浅蓝底 + 半透明白卡片，呼应参考图） ---------- */
+  --app-sidebar-bg: #eef3fc;
+  --app-sidebar-glow: rgb(255 255 255 / 78%);
+  --app-sidebar-item: rgb(255 255 255 / 58%);
+  --app-sidebar-item-hover: rgb(255 255 255 / 88%);
+  --app-sidebar-active: #ffffff;
+
+  /* ---------- 字体 ---------- */
+  --app-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --app-font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas,
+    "Liberation Mono", Menlo, monospace;
+
+  /* ---------- Element Plus 主题对齐 ---------- */
+  --el-color-primary: #1d6fd8;
+  --el-color-primary-light-3: #619ae4;
+  --el-color-primary-light-5: #8eb7ec;
+  --el-color-primary-light-7: #bbd4f4;
+  --el-color-primary-light-8: #d2e2f7;
+  --el-color-primary-light-9: #e8f1fb;
+  --el-color-primary-dark-2: #1759ad;
+  --el-color-success: #2f9e5f;
+  --el-color-warning: #c97b12;
+  --el-color-danger: #d64545;
+  --el-color-error: #d64545;
+  --el-border-radius-base: 6px;
+  --el-font-family: var(--app-font-sans);
+  --el-text-color-primary: var(--app-text);
+  --el-text-color-regular: var(--app-text-secondary);
+  --el-text-color-secondary: var(--app-text-muted);
+  --el-text-color-placeholder: #98a4b1;
+  --el-border-color-lighter: var(--app-border);
+  --el-border-color: var(--app-border-strong);
+  --el-bg-color: var(--app-surface);
+  --el-fill-color-blank: var(--app-surface);
+  --el-fill-color-lighter: var(--app-surface-2);
+}
+
+/* 深色模式：夜间巡检场景的刚需。变量与 Element Plus 的 dark 变量叠加，
+   组件自身只引用语义变量，因此无需逐页适配。 */
+html.dark {
+  color-scheme: dark;
+
+  --app-bg: #0f1319;
+  --app-surface: #161c24;
+  --app-surface-2: #1b232d;
+  --app-surface-3: #222c38;
+  --app-border: #29323e;
+  --app-border-strong: #37424f;
+
+  --app-text: #e8eef5;
+  --app-text-secondary: #b3c0ce;
+  --app-text-muted: #97a5b4;
+  --app-text-inverse: #0f1319;
+
+  --app-primary: #5b9cf5;
+  --app-success: #4ec27e;
+  --app-warning: #e0a044;
+  --app-danger: #f0736f;
+
+  --app-sidebar-bg: #131a22;
+  /* 深色下也要有一点顶部光晕，否则整块纯色发死 */
+  --app-sidebar-glow: rgb(74 116 168 / 16%);
+  --app-sidebar-item: rgb(255 255 255 / 7%);
+  --app-sidebar-item-hover: rgb(255 255 255 / 13%);
+  --app-sidebar-active: #1e2733;
+
+  --app-shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+  --app-shadow: 0 2px 10px rgb(0 0 0 / 45%);
+  --app-shadow-lg: 0 14px 36px rgb(0 0 0 / 55%);
+
+  --el-color-primary: #5b9cf5;
+  --el-color-primary-light-3: #4b81c7;
+  --el-color-primary-light-5: #3a659b;
+  --el-color-primary-light-7: #2b4a70;
+  --el-color-primary-light-8: #233c59;
+  --el-color-primary-light-9: #1b2c42;
+  --el-color-primary-dark-2: #7cb0f7;
+  --el-text-color-primary: var(--app-text);
+  --el-text-color-regular: var(--app-text-secondary);
+  --el-text-color-secondary: var(--app-text-muted);
+  --el-text-color-placeholder: #6f7c8a;
+  --el-border-color-lighter: var(--app-border);
+  --el-border-color: var(--app-border-strong);
+  --el-bg-color: var(--app-surface);
+  --el-bg-color-overlay: var(--app-surface-2);
+  --el-fill-color-blank: var(--app-surface);
+  --el-fill-color-lighter: var(--app-surface-2);
+  --el-fill-color-light: var(--app-surface-3);
+  --el-mask-color: rgb(0 0 0 / 65%);
+}
+
+/* ------------------------------- 基础重置 -------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-family: var(--app-font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+dl,
+dd,
+figure {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* 键盘可达性：所有可聚焦元素都有清晰的焦点环，鼠标点击不触发。 */
+:focus-visible {
+  outline: 2px solid var(--app-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* 尊重系统的减弱动效偏好。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------- 页面版式 -------------------------------- */
+
 .view {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--app-gap);
   padding-bottom: 8px;
+  min-width: 0;
 }
 
-.view-panel {
+/* 面板：与 AppPanel 组件同一份视觉，页面用类名或组件皆可。 */
+.view-panel,
+.app-panel {
   padding: 18px;
-  background: var(--el-bg-color, #fff);
-  border: 1px solid var(--el-border-color-lighter, #ebeef5);
-  border-radius: 8px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  box-shadow: var(--app-shadow-sm);
 }
 
-.view-panel__head {
+.view-panel__head,
+.app-panel__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 14px;
+  margin-bottom: var(--app-gap-inner);
 }
 
-.view-panel__head h2 {
-  margin: 0;
+.view-panel__head h2,
+.app-panel__head h2 {
   font-size: 15px;
-  font-weight: 700;
-  color: var(--el-text-color-primary, #303133);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--app-text);
 }
 
-.view-panel__head small {
-  color: var(--el-text-color-secondary, #909399);
+.view-panel__head small,
+.app-panel__head small {
+  color: var(--app-text-muted);
   font-size: 12px;
 }
 
@@ -51,7 +263,7 @@ a { color:inherit; text-decoration:none; }
 
 .view-toolbar__hint {
   font-size: 13px;
-  color: var(--el-text-color-secondary, #909399);
+  color: var(--app-text-muted);
 }
 
 .view-toolbar__actions {
@@ -63,9 +275,178 @@ a { color:inherit; text-decoration:none; }
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: var(--app-gap-inner);
 }
 
-.text-muted { color: var(--el-text-color-secondary, #909399); }
-.text-mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+/* 数值类文本统一等宽数字，避免遥测刷新时数字左右抖动。 */
+.text-tabular,
+.metric-card__value strong,
+.camera-metrics__item dd,
+.el-descriptions__cell .cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.text-muted {
+  color: var(--app-text-muted);
+}
+
+.text-secondary {
+  color: var(--app-text-secondary);
+}
+
+.text-mono {
+  font-family: var(--app-font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* --------------------------- Element Plus 对齐 ---------------------------- */
+
+/* el-card 与 .view-panel 视觉对齐：此前 DetectionsView 用 el-card（20px 内边距、
+   14px 头部），其余页面用 .view-panel（18px、无头部），同屏可见两套卡片。 */
+.el-card {
+  --el-card-border-color: var(--app-border);
+  --el-card-border-radius: var(--app-radius);
+
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius);
+  box-shadow: var(--app-shadow-sm);
+}
+
+.el-card__header {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.el-card__body {
+  padding: 18px;
+}
+
+/* 表格：斑马纹改用极浅的中性色，深色模式下自动反转。 */
+.el-table {
+  --el-table-border-color: var(--app-border);
+  --el-table-header-bg-color: var(--app-surface-2);
+  --el-table-header-text-color: var(--app-text-secondary);
+  --el-table-text-color: var(--app-text);
+  --el-table-row-hover-bg-color: var(--app-surface-2);
+  --el-table-bg-color: var(--app-surface);
+  --el-table-tr-bg-color: var(--app-surface);
+
+  border-radius: var(--app-radius-sm);
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+}
+
+/* 分页：中文 locale 之后文案更短，居中留白收一点。 */
+.el-pagination {
+  --el-pagination-Font-size: 13px;
+
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+
+.el-alert {
+  border-radius: var(--app-radius-sm);
+}
+
+/* 分隔线默认 24px 上下留白，在卡片内部显得过宽，统一收窄 */
+.el-divider--horizontal {
+  margin: 14px 0;
+}
+
+/* 表单项默认 18px，卡片内统一收到 14px，与 12/10 的卡片节奏保持协调 */
+.el-form-item {
+  margin-bottom: 14px;
+}
+
+.el-tag {
+  font-weight: 500;
+}
+
+.el-empty {
+  padding: 12px 0;
+}
+
+/* el-empty 的内置插图是浅色 3D 图，深色模式下会突兀地发白；
+   统一压暗去饱和，让空状态融进深色背景。 */
+html.dark .el-empty__image {
+  opacity: 0.6;
+  filter: grayscale(1) brightness(0.85);
+}
+
+.el-descriptions__label {
+  color: var(--app-text-muted) !important;
+  font-weight: 500 !important;
+}
+
+/* 滚动条：统一细条，深色模式跟随。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--app-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--app-border-strong);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--app-text-muted);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ------------------------------ 路由过渡 -------------------------------- */
+
+.route-fade-enter-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.route-fade-leave-active {
+  transition: opacity 0.12s ease;
+}
+
+.route-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.route-fade-leave-to {
+  opacity: 0;
+}
+
+/* ------------------------------ 窄屏适配 -------------------------------- */
+
+@media (max-width: 900px) {
+  :root {
+    --app-page-gutter: 16px;
+  }
+
+  .view-panel,
+  .app-panel {
+    padding: 14px;
+  }
+
+  /* 窄屏固定两列并允许收缩：auto-fill + 最小 140px 在 390～430px 的
+     手机上会算出超宽列，把内容顶出视口。 */
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

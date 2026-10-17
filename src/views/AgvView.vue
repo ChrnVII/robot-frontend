@@ -13,6 +13,8 @@ import MetricCard from '@/components/MetricCard.vue'
 import { ROBOT_COMMANDS, TASK_MODES, needsConfirmation, robotCommandLabel, sendRobotCommand } from '@/api/devices'
 import { useTelemetry } from '@/composables/useTelemetry'
 import { useAsyncTask } from '@/composables/useAsyncTask'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
+import { useBreakpoint } from '@/composables/useBreakpoint'
 import { displayNumber, formatTime, percentStatus } from '@/utils/format'
 
 // 命令按钮图标：仅用于视觉区分，不影响命令语义。
@@ -33,11 +35,24 @@ const COMMAND_ICONS = {
 
 const { telemetry, loading, error, updatedAt, refresh } = useTelemetry()
 const { pendingKey, run } = useAsyncTask()
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
+
+// 手动刷新走统一反馈：成功有提示，失败给出具体原因，而不是"点了没反应"。
+async function refreshTelemetry() {
+  await refreshWithFeedback(() => refresh(), {
+    success: '遥测数据已刷新',
+    failure: '遥测读取失败',
+    isError: () => error.value
+  })
+}
 
 const controls = reactive({ task: '', station: '', mode: '0' })
 const showDetails = ref(true)
 
 const state = computed(() => telemetry.value || {})
+// 位姿与主机状态共 12 项，窄屏从 4 列降到 2 列，避免每格被压成一条竖线。
+const isNarrow = useBreakpoint()
+const descColumns = computed(() => (isNarrow.value ? 2 : 4))
 const statusType = computed(() => (/error|fail/i.test(String(state.value.status)) ? 'danger' : /charging|running/i.test(String(state.value.status)) ? 'success' : 'info'))
 const updatedText = computed(() => (updatedAt.value ? formatTime(updatedAt.value) : ''))
 
@@ -84,7 +99,7 @@ function quickStop() {
       :updated-at="updatedText"
     >
       <template #extra>
-        <el-button :icon="Refresh" :loading="loading" @click="refresh">刷新遥测</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="refreshTelemetry">刷新遥测</el-button>
         <el-button type="danger" :icon="Close" @click="quickStop">结束任务</el-button>
       </template>
     </PageHeader>
@@ -105,7 +120,7 @@ function quickStop() {
           <h2>位姿与主机状态</h2>
           <el-button text type="primary" @click="showDetails = !showDetails">{{ showDetails ? '收起' : '展开' }}</el-button>
         </div>
-        <el-descriptions v-if="showDetails" :column="4" border size="small">
+        <el-descriptions v-if="showDetails" :column="descColumns" border size="small">
           <el-descriptions-item label="X 坐标">{{ displayNumber(state.x) }}</el-descriptions-item>
           <el-descriptions-item label="Y 坐标">{{ displayNumber(state.y) }}</el-descriptions-item>
           <el-descriptions-item label="YAW">{{ displayNumber(state.yaw, { unit: '°' }) }}</el-descriptions-item>
@@ -175,10 +190,6 @@ function quickStop() {
 </template>
 
 <style scoped>
-.agv-position {
-  margin: 16px 0;
-}
-
 .agv-form :deep(.el-input),
 .agv-select {
   width: 100%;
@@ -187,7 +198,7 @@ function quickStop() {
 .command-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
+  gap: var(--app-gap-inner);
 }
 
 .command-button {

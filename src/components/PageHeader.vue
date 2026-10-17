@@ -31,9 +31,16 @@ defineProps({
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--app-gap);
   flex-wrap: wrap;
-  margin-bottom: 18px;
+  margin-bottom: var(--app-gap);
+}
+
+/* min-width:0 是窄屏不横向溢出的关键：否则标题块按内容最小宽度撑开，
+   右侧按钮会被挤出视口而不是换行。 */
+.page-header__main {
+  min-width: 0;
+  flex: 1 1 240px;
 }
 
 .page-header__title {
@@ -44,16 +51,17 @@ defineProps({
 
 .page-header__title h1 {
   margin: 0;
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--el-text-color-primary);
-  letter-spacing: -0.3px;
+  font-size: 21px;
+  font-weight: 600;
+  color: var(--app-text);
+  letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 .page-header__description {
-  margin: 6px 0 0;
+  margin: 5px 0 0;
   font-size: 13px;
-  color: var(--el-text-color-secondary);
+  color: var(--app-text-muted);
 }
 
 .page-header__extra {
@@ -61,10 +69,24 @@ defineProps({
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .page-header__time {
   font-size: 12px;
-  color: var(--el-text-color-placeholder);
+  color: var(--app-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窄屏：操作区独占一行并允许内部换行，否则几个按钮会把标题挤出视口 */
+@media (max-width: 900px) {
+  .page-header {
+    align-items: flex-start;
+  }
+
+  .page-header__extra {
+    width: 100%;
+  }
 }
 </style>

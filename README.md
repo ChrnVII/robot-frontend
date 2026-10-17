@@ -1,6 +1,26 @@
 # frontend-re
 
-This template should help get you started developing with Vue 3 in Vite.
+巡检机器人控制台前端（Vue 3 + Vite + Element Plus）。
+
+## 部署要求：与后端同机
+
+**本前端应与后端服务部署在同一台主机上**（后端默认 `http://127.0.0.1:8100`）。原因：
+
+- 球形摄像页的「打开目录」按钮**直接打开本机磁盘上的录像文件夹**（`file://` 直开，被浏览器拦截时复制路径让用户粘贴到资源管理器），跨主机时该路径并不存在；
+- 录像、抓图等媒体资产保存在后端本机磁盘，只有同机浏览器才能直接访问/打开；
+- 生产配置 `VITE_SERVER_URL` 指向 `127.0.0.1`，开发环境经 Vite 代理转发到同机后端；
+- 实时预览走同源 WebSocket（`/ws/camera/preview`），同机部署不需要额外的跨域与 TLS 处理。
+
+如果确实要前后端分离部署：把 `VITE_SERVER_URL` 改成后端主机地址、后端配置 `ROBOT_CORS_ORIGINS` 并启用 HTTPS（浏览器低延迟预览要求安全上下文），同时接受「打开目录」只能复制路径、需要在后端主机上手工查看录像。
+
+### 与「打开目录」相关的变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `VITE_SERVER_URL` | 后端地址；开发环境留空走 Vite 代理，生产环境填 `http://127.0.0.1:8100` |
+| `VITE_RECORDINGS_DIR` | 录像目录的**绝对路径**（对应后端 `ROBOT_CAMERA_RECORDINGS_DIR`，默认 `<后端启动目录>/data/camera-recordings`）；留空则首次点击按钮时弹框询问一次，之后记在浏览器 `localStorage` |
+
+> 浏览器安全策略不允许 http(s) 页面导航到 `file://`，所以「打开目录」是尽力而为：能直开就直开，否则把路径复制到剪贴板并提示粘贴到资源管理器地址栏。若需要真正的“一键打开”，只能由同机的本地代理或桌面壳（Electron 等）承担。
 
 ## Recommended IDE Setup
 

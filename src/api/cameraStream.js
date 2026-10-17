@@ -48,9 +48,18 @@ export function getCameraStreamStatus() {
 
 /* ------------------------------ 录像 ------------------------------ */
 
-/** 录像分段列表（新→旧）。 */
+/** 录像分段列表（新→旧）。响应含 { rows, dir }，dir 是后端配置的绝对目录。 */
 export function listRecordings() {
   return request({ url: '/api/v1/cam/recordings', method: 'get' })
+}
+
+/**
+ * 让**后端主机**打开录像目录（资源管理器 / Finder）。
+ * 浏览器不允许 http 页面跳 file://，所以这一步只能由服务端执行；
+ * 返回 { opened, dir, detail? }，opened=false 时调用方退回「复制路径」。
+ */
+export function openRecordingsFolder() {
+  return request({ url: '/api/v1/cam/recordings/open', method: 'post' })
 }
 
 /** 开始 / 停止录像；停止时排空写盘队列并立即收尾。 */

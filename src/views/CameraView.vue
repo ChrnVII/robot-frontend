@@ -11,22 +11,26 @@
 // 与画面链路互不影响。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  Aim, Camera, Delete, Plus, Refresh, RefreshRight, SwitchButton, VideoCamera, Warning
+  Aim, Delete, FolderOpened, Plus, Refresh, RefreshRight, SwitchButton, VideoCamera
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import {
-  cameraSnapshot, deleteCameraPreset, gotoCameraPreset, listCameraPresets,
+  deleteCameraPreset, gotoCameraPreset, listCameraPresets,
   ptzContinuous, rebootCamera, saveCameraPreset
 } from '@/api/safety'
 import {
-  controlRecording, deleteRecording, listRecordings, downloadRecording, getCameraStreamStatus, getCameraPreviewFrame
+  controlRecording, listRecordings, getCameraStreamStatus, getCameraPreviewFrame,
+  openRecordingsFolder
 } from '@/api/cameraStream'
 import { unwrap, unwrapRows } from '@/api/envelope'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { useCameraStream } from '@/composables/useCameraStream'
+import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 import { formatTime } from '@/utils/format'
+import { getErrorMessage } from '@/utils/request'
+import { configuredRecordingsDir, openLocalFolder } from '@/utils/localFolder'
 
 const FRAME_INTERVAL = 1000
 
@@ -46,10 +50,11 @@ const frameSrc = ref('')
 let framePending = false
 let pageDisposed = false
 const lastAction = ref('待命')
-const snapshotAsset = ref(null)
 const newPresetId = ref('')
 
 const recordings = ref([])
+// 后端配置的录像目录绝对路径（默认 data/dome-cam/recordings），只读展示，不可修改。
+const recordingsDir = ref('')
 const recordingState = ref(null)
 const recordingsError = ref('')
 const recordingsLoading = ref(false)
@@ -58,6 +63,7 @@ const videoCanvas = ref(null)
 const stream = useCameraStream()
 
 const { pendingKey, run } = useAsyncTask()
+const { refresh: refreshWithFeedback } = useRefreshFeedback()
 const { loading, error, load } = useAsyncData(async () => {
   const rows = await listCameraPresets()
   presets.value = rows
@@ -90,16 +96,6 @@ const feedLabel = computed(() => {
 
 const isRecording = computed(() => Boolean(recordingState.value?.recording))
 
-const recordingStatusText = computed(() => {
-  const state = recordingState.value
-  if (!state) return '正在读取录像状态…'
-  if (state.error) return `录像异常 · ${state.error}`
-  if (state.recording) {
-    return state.currentFile ? `录像中 · ${state.currentFile}` : '录像中 · 等待关键帧开段'
-  }
-  return `已停止 · 共 ${state.segments || 0} 段`
-})
-
 const streamMetrics = computed(() => {
   const metrics = stream.metrics
   return [
@@ -117,12 +113,6 @@ const resolutionText = computed(() => (
     : '—'
 ))
 
-const snapshotText = computed(() => {
-  if (!snapshotAsset.value) return '尚未抓图'
-  const asset = snapshotAsset.value
-  return `${asset.assetId || asset.uri || '已保存'} · ${formatTime(asset.capturedAt)}`
-})
-
 async function loadStreamStatus() {
   if (statusPending) return
   statusPending = true
@@ -134,15 +124,13 @@ async function loadStreamStatus() {
   } finally { statusPending = false }
 }
 
-async function download(row) {
-  await run(`download-${row.name}`, () => downloadRecording(row.name))
-}
-
 async function loadRecordings() {
   recordingsLoading.value = true
   recordingsError.value = ''
   try {
-    recordings.value = unwrapRows(await listRecordings(), [])
+    const response = await listRecordings()
+    recordings.value = unwrapRows(response, [])
+    recordingsDir.value = String(unwrap(response, {})?.dir || '')
   } catch (reason) {
     recordingsError.value = reason?.message || '录像列表读取失败'
   } finally {
@@ -161,23 +149,6 @@ async function toggleRecording() {
   await loadRecordings()
 }
 
-async function removeRecording(row) {
-  try {
-    await ElMessageBox.confirm(
-      `删除录像「${row.name}」？该操作不可恢复。`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch {
-    return
-  }
-  const result = await run(`deleteRecording-${row.name}`, () => deleteRecording(row.name), {
-    success: '录像已删除'
-  })
-  if (result === undefined) return
-  await loadRecordings()
-}
-
 async function tickFrame() {
   if (!usingFallback.value || framePending || pageDisposed) return
   framePending = true
@@ -193,12 +164,38 @@ async function tickFrame() {
 }
 watch(usingFallback, (fallback) => { if (fallback) tickFrame() })
 
+function pauseFramePolling() {
+  if (timer) {
+    window.clearInterval(timer)
+    timer = null
+  }
+}
+
+function resumeFramePolling() {
+  if (timer || pageDisposed) return
+  timer = window.setInterval(tickFrame, FRAME_INTERVAL)
+  if (usingFallback.value) tickFrame()
+}
+
+// 页面不可见时同时停掉云台与截图轮询：后台标签页没有必要每秒拉一张 JPEG。
+function handleVisibility() {
+  if (document.hidden) {
+    releasePtz()
+    pauseFramePolling()
+    return
+  }
+  resumeFramePolling()
+}
+
 onMounted(() => {
   load()
   loadRecordings()
   loadStreamStatus()
   statusTimer = window.setInterval(loadStreamStatus, 3000)
-  timer = window.setInterval(tickFrame, FRAME_INTERVAL)
+  resumeFramePolling()
+  window.addEventListener('mouseup', releasePtz)
+  window.addEventListener('blur', releasePtz)
+  document.addEventListener('visibilitychange', handleVisibility)
 })
 
 // 画面独立于预置点加载；canvas 出现后绑定，attach 可重复调用。
@@ -220,16 +217,68 @@ stream.onMessage((message) => {
 
 onBeforeUnmount(() => {
   pageDisposed = true
+  // 卸载前先停转：按着方向键切走页面时，相机不能继续转。
+  if (ptzActive.value) ptzContinuous('stop', speed.value).catch(() => {})
   if (frameSrc.value) URL.revokeObjectURL(frameSrc.value)
   if (timer) window.clearInterval(timer)
   if (statusTimer) window.clearInterval(statusTimer)
+  window.removeEventListener('mouseup', releasePtz)
+  window.removeEventListener('blur', releasePtz)
+  document.removeEventListener('visibilitychange', handleVisibility)
 })
 
-async function ptz(direction) {
-  const result = await run(`ptz-${direction}`, () => ptzContinuous(direction, speed.value), {
-    success: `云台${direction === 'stop' ? '停止' : '转动'}指令已下发`
+// -------------------------------- 云台 -------------------------------------
+// 按住转动：按下即开始连续转动，松开 / 移出按钮 / 窗口失焦 / 切换标签页立刻停止。
+// 改造前是「点一下开始转，必须再点一次停止」——鼠标移开画面相机仍在转，
+// 对一台能拍到整舍的球机来说这是明确的误操作风险。
+const ptzActive = ref('')
+let ptzStartPromise = null
+
+function ptzDirectionLabel(direct) {
+  return PTZ_DIRECTIONS.find((item) => item.direct === direct)?.label || direct
+}
+
+async function ptzStart(direct) {
+  if (direct === 'stop') {
+    await ptzStop()
+    return
+  }
+  if (ptzActive.value) return
+  ptzActive.value = direct
+  lastAction.value = `云台向${ptzDirectionLabel(direct)}`
+  ptzStartPromise = ptzContinuous(direct, speed.value).catch((reason) => {
+    ElMessage.error(getErrorMessage(reason, '云台指令下发失败'))
+    if (ptzActive.value === direct) ptzActive.value = ''
   })
-  if (result !== undefined) lastAction.value = direction === 'stop' ? '云台停止' : `云台向${direction}`
+  await ptzStartPromise
+}
+
+async function ptzStop() {
+  if (!ptzActive.value) return
+  ptzActive.value = ''
+  lastAction.value = '云台停止'
+  // 必须等启动请求落地再发停止：并发下发时若停止先到、启动后到，
+  // 相机就会停在「一直在转」的状态。
+  try {
+    await ptzStartPromise
+  } catch {
+    /* 启动失败已在 ptzStart 内提示 */
+  }
+  ptzStartPromise = null
+  try {
+    await ptzContinuous('stop', speed.value)
+  } catch (reason) {
+    ElMessage.error(getErrorMessage(reason, '云台停止指令下发失败'))
+  }
+}
+
+// 松开位置可能在按钮之外（拖出去、右键、触屏），所以监听 document 级事件兜底。
+function releasePtz() {
+  if (ptzActive.value) ptzStop()
+}
+
+function handlePtzVisibility() {
+  if (document.hidden) releasePtz()
 }
 
 async function goPreset() {
@@ -241,11 +290,50 @@ async function goPreset() {
   if (result !== undefined) lastAction.value = `转到 ${currentPreset.value?.name || currentPresetId.value}`
 }
 
-async function snapshot() {
-  const result = await run('snapshot', () => cameraSnapshot(currentPresetId.value), { success: '抓图完成' })
-  if (result === undefined) return
-  snapshotAsset.value = unwrap(result, null)
-  lastAction.value = '抓图'
+// 录像目录由后端配置决定（默认 data/dome-cam/recordings），页面不提供修改入口。
+// 主路径是请后端在**它所在的主机**上拉起资源管理器——浏览器不允许 http 页面
+// 跳 file://，所以只有服务端能真正打开。服务端没有桌面会话时退回本机尝试 +
+// 复制路径，保证按钮不会"点了没反应"。
+async function openFolder() {
+  try {
+    const result = unwrap(await openRecordingsFolder(), {})
+    if (result.opened) {
+      ElMessage.success({
+        message: `已打开录像目录：${result.dir || recordingsDir.value}`,
+        duration: 4000
+      })
+      return
+    }
+    await openFolderOnThisMachine(result.dir || recordingsDir.value)
+  } catch (reason) {
+    // 旧后端没有该接口（404）或服务不可用：走本机兜底
+    await openFolderOnThisMachine(recordingsDir.value || configuredRecordingsDir(), reason)
+  }
+}
+
+/** 降级：尝试用浏览器打开本机同名路径，并始终把路径复制给用户。 */
+async function openFolderOnThisMachine(dir, reason) {
+  const target = String(dir || '').trim()
+  if (!target) {
+    ElMessage.warning(getErrorMessage(reason, '后端未返回录像目录，暂时无法打开'))
+    return
+  }
+  const { opened, copied } = await openLocalFolder(target)
+  if (opened) {
+    ElMessage.success({
+      message: copied
+        ? `已请求打开录像目录：${target}；若浏览器拦截了本地路径，路径已复制`
+        : `已请求打开录像目录：${target}`,
+      duration: 8000
+    })
+  } else if (copied) {
+    ElMessage.warning({
+      message: `浏览器禁止网页直接打开本地文件夹，目录路径已复制，请粘贴到资源管理器地址栏：${target}`,
+      duration: 8000
+    })
+  } else {
+    ElMessage.warning(`录像目录：${target}`)
+  }
 }
 
 async function addPreset() {
@@ -294,10 +382,16 @@ async function reboot() {
 }
 
 async function refresh() {
-  await load()
-  await loadRecordings()
-  stream.reconnect()
-  if (!error.value) ElMessage.success('预置点已刷新')
+  await refreshWithFeedback(async () => {
+    await load()
+    await loadRecordings()
+    stream.reconnect()
+    return !error.value && !recordingsError.value
+  }, {
+    success: '预置点与录像已刷新',
+    failure: '刷新失败，请检查摄像头服务',
+    isError: () => error.value || recordingsError.value
+  })
 }
 
 function onFrameError() {
@@ -322,205 +416,191 @@ function onFrameError() {
     </PageHeader>
 
     <el-alert v-if="error" type="warning" :title="error" :closable="false" />
-    <div>
-      <div class="camera-layout">
-        <section class="view-panel camera-stage">
-          <div class="camera-stage__head">
-            <span class="camera-live"><i />{{ feedLabel }}</span>
-            <span class="text-muted">CH 01 · {{ currentPreset?.name || '手动' }} · {{ resolutionText }}</span>
-          </div>
-          <div class="camera-stage__frame">
-            <!-- 低延迟链路：WebCodecs 解码结果画到 canvas -->
-            <canvas
-              v-show="!usingFallback"
-              ref="videoCanvas"
-              class="camera-stage__canvas"
-            />
-            <!-- 降级链路：保留原有的 JPEG 轮询 -->
-            <img
-              v-if="usingFallback && frameSrc"
-              :src="frameSrc"
-              alt="摄像头实时画面"
-              @error="onFrameError"
-              @load="fallbackLoaded = true; fallbackError = false"
-            />
-            <div v-if="usingFallback ? !fallbackLoaded : stream.phase.value !== 'live'" class="camera-stage__placeholder">
-              <VideoCamera /><strong>{{ feedStatusText }}</strong>
-              <el-button size="small" @click="stream.reconnect()">重新连接</el-button>
-            </div>
-            <span class="camera-stage__meta">{{ isRecording ? '● 录制中' : '实时预览' }}</span>
-          </div>
-
-          <dl v-if="!usingFallback" class="camera-metrics">
-            <div v-for="item in streamMetrics" :key="item.label" class="camera-metrics__item">
-              <dt>{{ item.label }}</dt>
-              <dd>{{ item.value }}</dd>
-            </div>
-          </dl>
-          <el-alert
-            v-else
-            class="camera-tip"
-            type="warning"
-            :closable="false"
-            show-icon
-            title="当前使用 JPEG 轮询（约 1 帧/秒）"
-            :description="stream.blockReason.value || '低延迟画面需要 HTTPS 或 localhost 访问，且浏览器支持 WebCodecs。'"
+    <div class="camera-layout">
+      <section class="view-panel camera-stage">
+        <div class="camera-stage__head">
+          <span class="camera-live"><i />{{ feedLabel }}</span>
+          <span class="text-muted">CH 01 · {{ currentPreset?.name || '手动' }} · {{ resolutionText }}</span>
+        </div>
+        <div class="camera-stage__frame">
+          <!-- 低延迟链路：WebCodecs 解码结果画到 canvas -->
+          <canvas
+            v-show="!usingFallback"
+            ref="videoCanvas"
+            class="camera-stage__canvas"
           />
-
-          <div class="camera-stage__actions">
-            <el-button :type="isRecording ? 'danger' : 'primary'" :icon="VideoCamera"
-              :loading="pendingKey === 'record-start' || pendingKey === 'record-stop'"
-              :disabled="!recordingState || Boolean(pendingKey)" @click="toggleRecording">
-              {{ isRecording ? '停止录像' : '开始录像' }}
-            </el-button>
-            <el-button type="primary" :icon="Camera" :loading="pendingKey === 'snapshot'" @click="snapshot">抓图</el-button>
-            <span class="text-muted">最近抓图：{{ snapshotText }}</span>
-          </div>
-        </section>
-
-        <section class="view-panel camera-controls">
-          <div class="view-panel__head">
-            <h2>预置点</h2>
-            <small>预置点由摄像头端保存</small>
-          </div>
-          <el-select v-model="currentPresetId" class="full-control" placeholder="选择预置点">
-            <el-option v-for="item in presets" :key="item.presetId" :label="`${item.name}（ID ${item.presetId}）`" :value="item.presetId" />
-          </el-select>
-          <div class="camera-controls__row">
-            <el-button type="primary" :icon="Aim" :loading="pendingKey === 'goto'" :disabled="!currentPresetId" @click="goPreset">转到预置点</el-button>
-            <el-button type="danger" plain :icon="Delete" :loading="pendingKey === 'deletePreset'" :disabled="!currentPresetId" @click="removePreset">删除</el-button>
-          </div>
-
-          <el-divider content-position="left">新增 / 修改预置点</el-divider>
-          <div class="camera-controls__row">
-            <el-input-number v-model="newPresetId" :min="1" :max="255" :controls="false" placeholder="预置点 ID" class="preset-input" />
-            <el-button type="success" :icon="Plus" :loading="pendingKey === 'savePreset'" @click="addPreset">保存为预置点</el-button>
-          </div>
-          <p class="text-muted preset-hint">同 ID 再次保存即覆盖该预置点的当前位置。</p>
-        </section>
-
-        <section class="view-panel camera-controls">
-          <div class="view-panel__head">
-            <h2>云台控制</h2>
-            <small>速度范围 1–120</small>
-          </div>
-          <el-slider v-model="speed" :min="1" :max="120" show-input :show-input-controls="false" />
-
-          <div class="ptz-pad">
-            <el-button
-              v-for="item in PTZ_DIRECTIONS"
-              :key="item.direct"
-              :type="item.danger ? 'danger' : 'default'"
-              :loading="pendingKey === `ptz-${item.direct}`"
-              :disabled="Boolean(pendingKey)"
-              class="ptz-button"
-              @click="ptz(item.direct)"
-            >
-              {{ item.icon }} {{ item.label }}
-            </el-button>
-          </div>
-
-          <el-alert
-            class="camera-tip"
-            type="info"
-            :closable="false"
-            show-icon
-            :title="`方向值按设备协议下发（direct=${PTZ_DIRECTIONS.map((item) => item.direct).join(' / ')}），速度 ${speed}。`"
+          <!-- 降级链路：保留原有的 JPEG 轮询 -->
+          <img
+            v-if="usingFallback && frameSrc"
+            :src="frameSrc"
+            alt="摄像头实时画面"
+            @error="onFrameError"
+            @load="fallbackLoaded = true; fallbackError = false"
           />
-        </section>
-      </div>
-
-      <section class="view-panel">
-        <div class="view-panel__head">
-          <h2>预置点清单</h2>
-          <small>共 {{ presets.length }} 个预置点</small>
-        </div>
-        <el-table :data="presets" border stripe size="small">
-          <template #empty>
-            <el-empty description="摄像头未返回预置点" :image-size="64" />
-          </template>
-          <el-table-column prop="presetId" label="预置点 ID" width="120" />
-          <el-table-column prop="name" label="名称" min-width="180" />
-          <el-table-column label="操作" width="220">
-            <template #default="{ row }">
-              <el-button
-                text
-                type="primary"
-                size="small"
-                :icon="SwitchButton"
-                :loading="pendingKey === 'goto'"
-                @click="currentPresetId = row.presetId; goPreset()"
-              >
-                转到此预置点
-              </el-button>
-              <el-button text type="warning" size="small" :icon="Warning" @click="currentPresetId = row.presetId; snapshot()">
-                抓图
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </section>
-
-      <section class="view-panel camera-recordings">
-        <div class="view-panel__head">
-          <h2>录像</h2>
-          <small>共 {{ recordings.length }} 段 · 录像保存在服务端，停止后可下载</small>
+          <div v-if="usingFallback ? !fallbackLoaded : stream.phase.value !== 'live'" class="camera-stage__placeholder">
+            <VideoCamera /><strong>{{ feedStatusText }}</strong>
+            <el-button size="small" @click="stream.reconnect()">重新连接</el-button>
+          </div>
+          <span class="camera-stage__meta">{{ isRecording ? '● 录制中' : '实时预览' }}</span>
         </div>
 
-        <div class="camera-recordings__bar">
-          <el-button
-            :type="isRecording ? 'danger' : 'primary'"
-            :icon="VideoCamera"
-            :loading="pendingKey === 'record-start' || pendingKey === 'record-stop'"
-            :disabled="!recordingState || Boolean(pendingKey)"
-            @click="toggleRecording"
-          >
-            {{ isRecording ? '停止录像' : '开始录像' }}
-          </el-button>
-          <span class="camera-recordings__state">
-            <i :class="['camera-recordings__dot', { 'is-on': isRecording }]" />
-            {{ recordingStatusText }}
-          </span>
-          <el-button text :icon="Refresh" :loading="recordingsLoading" @click="loadRecordings">刷新列表</el-button>
-        </div>
-
+        <dl v-if="!usingFallback" class="camera-metrics">
+          <div v-for="item in streamMetrics" :key="item.label" class="camera-metrics__item">
+            <dt>{{ item.label }}</dt>
+            <dd>{{ item.value }}</dd>
+          </div>
+        </dl>
         <el-alert
-          v-if="recordingsError"
+          v-else
           class="camera-tip"
           type="warning"
           :closable="false"
           show-icon
-          :title="recordingsError"
+          title="当前使用 JPEG 轮询（约 1 帧/秒）"
+          :description="stream.blockReason.value || '低延迟画面需要 HTTPS 或 localhost 访问，且浏览器支持 WebCodecs。'"
         />
 
-        <el-table :data="recordings" border stripe size="small">
-          <template #empty>
-            <el-empty description="暂无录像分段" :image-size="64" />
-          </template>
-          <el-table-column prop="name" label="文件名" min-width="240" />
-          <el-table-column prop="sizeText" label="大小" width="110" />
-          <el-table-column label="时间" width="180">
-            <template #default="{ row }">{{ formatTime(row.modifiedAt) }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="170">
-            <template #default="{ row }">
-              <el-button text type="primary" :disabled="row.active" :loading="pendingKey === `download-${row.name}`" @click="download(row)">下载</el-button>
-              <el-button
-                text
-                type="danger"
-                size="small"
-                :icon="Delete"
-                :loading="pendingKey === `deleteRecording-${row.name}`"
-                :disabled="row.active"
-                @click="removeRecording(row)"
-              >
-                删除
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+        <div class="camera-stage__actions">
+          <el-button :type="isRecording ? 'danger' : 'primary'" :icon="VideoCamera"
+            :loading="pendingKey === 'record-start' || pendingKey === 'record-stop'"
+            :disabled="!recordingState || Boolean(pendingKey)" @click="toggleRecording">
+            {{ isRecording ? '停止录像' : '开始录像' }}
+          </el-button>
+        </div>
+      </section>
+
+      <section class="view-panel camera-controls">
+        <div class="view-panel__head">
+          <h2>预置点</h2>
+          <small>预置点由摄像头端保存</small>
+        </div>
+        <el-select v-model="currentPresetId" class="full-control" placeholder="选择预置点">
+          <el-option v-for="item in presets" :key="item.presetId" :label="`${item.name}（ID ${item.presetId}）`" :value="item.presetId" />
+        </el-select>
+        <div class="camera-controls__row">
+          <el-button type="primary" :icon="Aim" :loading="pendingKey === 'goto'" :disabled="!currentPresetId" @click="goPreset">转到预置点</el-button>
+          <el-button type="danger" plain :icon="Delete" :loading="pendingKey === 'deletePreset'" :disabled="!currentPresetId" @click="removePreset">删除</el-button>
+        </div>
+
+        <el-divider content-position="left">新增 / 修改预置点</el-divider>
+        <div class="camera-controls__row">
+          <el-input-number v-model="newPresetId" :min="1" :max="255" :controls="false" placeholder="预置点 ID" class="preset-input" />
+          <el-button type="success" :icon="Plus" :loading="pendingKey === 'savePreset'" @click="addPreset">保存为预置点</el-button>
+        </div>
+        <p class="text-muted preset-hint">同 ID 再次保存即覆盖该预置点的当前位置。</p>
+      </section>
+
+      <section class="view-panel camera-controls">
+        <div class="view-panel__head">
+          <h2>云台控制</h2>
+          <small>速度范围 1–120</small>
+        </div>
+        <el-slider v-model="speed" :min="1" :max="120" show-input :show-input-controls="false" />
+
+        <!-- 按住转动 / 松开停止：不再需要用户额外记得点「停止」 -->
+        <div class="ptz-pad" role="group" aria-label="云台方向控制">
+          <el-button
+            v-for="item in PTZ_DIRECTIONS"
+            :key="item.direct"
+            :type="item.danger ? 'danger' : 'default'"
+            :class="['ptz-button', { 'is-pressing': ptzActive === item.direct }]"
+            :disabled="Boolean(ptzActive) && ptzActive !== item.direct && item.direct !== 'stop'"
+            @mousedown.prevent="item.direct === 'stop' ? ptzStop() : ptzStart(item.direct)"
+            @touchstart.prevent="item.direct === 'stop' ? ptzStop() : ptzStart(item.direct)"
+            @mouseup="ptzStop"
+            @mouseleave="ptzStop"
+            @touchend.prevent="ptzStop"
+            @touchcancel.prevent="ptzStop"
+            @keydown.enter.prevent="item.direct === 'stop' ? ptzStop() : ptzStart(item.direct)"
+            @keydown.space.prevent="item.direct === 'stop' ? ptzStop() : ptzStart(item.direct)"
+            @keyup.enter="ptzStop"
+            @keyup.space="ptzStop"
+          >
+            <span class="ptz-button__icon" aria-hidden="true">{{ item.icon }}</span>
+            <span>{{ item.label }}</span>
+          </el-button>
+        </div>
+
+        <p class="ptz-hint" role="status" aria-live="polite">
+          <template v-if="ptzActive">正在向{{ ptzDirectionLabel(ptzActive) }}转动 · 松开即停</template>
+          <template v-else>按住方向按钮转动，松开立即停止</template>
+        </p>
+
+        <el-alert
+          class="camera-tip"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`方向值按设备协议下发（direct=${PTZ_DIRECTIONS.map((item) => item.direct).join(' / ')}），当前速度 ${speed}。`"
+        />
       </section>
     </div>
+
+    <section class="view-panel">
+      <div class="view-panel__head">
+        <h2>预置点清单</h2>
+        <small>共 {{ presets.length }} 个预置点</small>
+      </div>
+      <el-table :data="presets" border stripe size="small">
+        <template #empty>
+          <el-empty description="摄像头未返回预置点" :image-size="64" />
+        </template>
+        <el-table-column prop="presetId" label="预置点 ID" width="120" />
+        <el-table-column prop="name" label="名称" min-width="180" />
+        <el-table-column label="操作" width="140">
+          <template #default="{ row }">
+            <el-button
+              text
+              type="primary"
+              size="small"
+              :icon="SwitchButton"
+              :loading="pendingKey === 'goto'"
+              @click="currentPresetId = row.presetId; goPreset()"
+            >
+              转到此预置点
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <section class="view-panel camera-recordings">
+      <div class="view-panel__head">
+        <div class="camera-recordings__title">
+          <h2>录像</h2>
+          <!-- 目录只读展示：存储位置由后端配置，页面不提供修改入口 -->
+          <small :title="recordingsDir || '录像目录由后端配置'">
+            {{ recordingsDir || '目录由后端配置' }}
+          </small>
+        </div>
+        <div class="camera-recordings__actions">
+          <el-button text :icon="Refresh" :loading="recordingsLoading" @click="loadRecordings">刷新列表</el-button>
+          <el-tooltip :content="recordingsDir ? `打开 ${recordingsDir}` : '打开录像存储目录'" placement="top">
+            <el-button text :icon="FolderOpened" @click="openFolder">打开目录</el-button>
+          </el-tooltip>
+        </div>
+      </div>
+
+      <el-alert
+        v-if="recordingsError"
+        class="camera-tip"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="recordingsError"
+      />
+
+      <el-table :data="recordings" border stripe size="small">
+        <template #empty>
+          <el-empty description="暂无录像分段" :image-size="64" />
+        </template>
+        <el-table-column prop="name" label="文件名" min-width="240" />
+        <el-table-column prop="sizeText" label="大小" width="110" />
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.modifiedAt) }}</template>
+        </el-table-column>
+      </el-table>
+    </section>
   </div>
 </template>
 
@@ -528,8 +608,7 @@ function onFrameError() {
 .camera-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--app-gap);
 }
 
 @media (max-width: 1200px) {
@@ -670,6 +749,28 @@ function onFrameError() {
 .ptz-button {
   width: 100%;
   margin-left: 0 !important;
+  /* 按住拖动时不要触发文本选中或页面滚动 */
+  user-select: none;
+  touch-action: none;
+}
+
+.ptz-button__icon {
+  margin-right: 4px;
+  font-size: 13px;
+}
+
+/* 按住期间的即时反馈：按钮压深 + 内阴影，用户能确认"指令正在生效" */
+.ptz-button.is-pressing {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 6px rgb(0 0 0 / 18%);
+  filter: brightness(0.94);
+}
+
+.ptz-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--app-text-muted);
+  text-align: center;
 }
 
 .camera-tip {
@@ -678,41 +779,31 @@ function onFrameError() {
 
 /* ------------------------------- 录像 ------------------------------- */
 
-.camera-recordings {
-  margin-top: 16px;
+.camera-recordings__title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
 }
 
-.camera-recordings__bar {
+.camera-recordings__title small {
+  overflow: hidden;
+  max-width: 420px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--app-font-mono);
+}
+
+.camera-recordings__actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 4px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
 }
 
-.camera-recordings__state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1 1 auto;
-  min-width: 200px;
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
-
-.camera-recordings__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--el-text-color-placeholder);
-}
-
-.camera-recordings__dot.is-on {
-  background: var(--el-color-danger);
-}
-
-.camera-recordings__link {
-  margin-right: 12px;
-  font-size: 12px;
+@media (max-width: 900px) {
+  .camera-recordings__title small {
+    max-width: 100%;
+  }
 }
 </style>

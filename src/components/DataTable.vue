@@ -21,13 +21,26 @@ const props = defineProps({
   rowClassName: { type: [String, Function], default: '' }
 })
 
-const emit = defineEmits(['update:page', 'update:pageSize', 'row-click'])
+const emit = defineEmits(['update:page', 'update:pageSize', 'page-change', 'size-change', 'row-click'])
 
 const totalCount = computed(() => (props.total > 0 ? props.total : props.rows.length))
 const showPagination = computed(() => props.pagination && totalCount.value > 0)
 
 function handleRowClick(row) {
   emit('row-click', row)
+}
+
+// 同时给出 v-model 风格的 update:* 和语义化的 page-change / size-change：
+// 服务端分页的页面用后者，避免 @update:page-size 与 emit('update:pageSize')
+// 之间大小写匹配的歧义（事件名匹配是精确的，kebab/camel 混用容易静默失效）。
+function handlePageChange(value) {
+  emit('update:page', value)
+  emit('page-change', value)
+}
+
+function handlePageSizeChange(value) {
+  emit('update:pageSize', value)
+  emit('size-change', value)
 }
 </script>
 
@@ -44,8 +57,12 @@ function handleRowClick(row) {
       size="default"
       @row-click="handleRowClick"
     >
+      <!-- 空状态可被页面覆盖：给一个「立即新建」之类的引导动作，
+           比只显示一行「暂无数据」有用得多 -->
       <template #empty>
-        <el-empty :description="emptyText" :image-size="72" />
+        <slot name="empty">
+          <el-empty :description="emptyText" :image-size="72" />
+        </slot>
       </template>
 
       <el-table-column
@@ -71,8 +88,8 @@ function handleRowClick(row) {
         :page-size="pageSize"
         :page-sizes="pageSizes"
         :total="totalCount"
-        @update:current-page="emit('update:page', $event)"
-        @update:page-size="emit('update:pageSize', $event)"
+        @update:current-page="handlePageChange"
+        @update:page-size="handlePageSizeChange"
       />
     </div>
   </div>
