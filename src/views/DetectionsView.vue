@@ -8,7 +8,10 @@ import { listCameras } from '@/api/cameras'
 import { unwrap, apiErrorMessage } from '@/api/envelope'
 import { captureMedia, getInspectionConfig, getInspectionStatus, startInspection, stopInspection,
   moveInspectionLift, stopInspectionLift, getInspectionFiles, downloadInspectionFile } from '@/api/inspection'
+import { listMediaAssets, loadAudioUrl, downloadMediaAsset } from '@/api/media'
 import { copyText } from '@/utils/localFolder'
+
+const AUDIO_DURATION = 10 // 与后端冻结参数一致（44.1kHz/单声道/10s），不随请求覆盖
 
 const TASK_KEY = 'inspection-robot.active-inspection'
 const SELECTION_KEY = 'inspection-robot.selected-cameras'
@@ -21,6 +24,14 @@ const busy = ref('')
 const restoring = ref(true)
 const statusError = ref('')
 const audioBusy = ref(false)
+const audioVisible = ref(false)
+const audioAssets = ref([])
+const audioLoading = ref(false)
+const audioError = ref('')
+const audioPlaying = ref('') // 正在加载/播放的 assetId
+const audioUrl = ref('')    // 当前 <audio> 的 object URL
+const audioRef = ref(null)  // <audio> 元素
+const audioTotal = ref(0)
 const liftBusy = ref('')
 const folderVisible = ref(false)
 const files = ref([])
@@ -91,11 +102,55 @@ async function stop() {
 async function captureAudio() {
   audioBusy.value = true
   try {
-    await captureMedia({ taskRunId: task.value.taskRunId || 'manual-' + Date.now(), waypointId: 'inspection-audio',
-      deviceId: 'audio', mediaType: 'audio', parameters: { sample_rate: 16000, channels: 1, duration_seconds: 3 } })
-    ElMessage.success('音频采集完成')
+    // 参数不随请求下发：44.1kHz/单声道/10s 已在后端配置冻结，前端只触发。
+    const value = unwrap(await captureMedia({ taskRunId: task.value.taskRunId || 'manual-' + Date.now(),
+      waypointId: 'inspection-audio', deviceId: 'audio', mediaType: 'audio' }), {})
+    const quality = value?.qualityState || 'valid'
+    if (quality === 'valid') ElMessage.success('录音完成（10 秒）')
+    else if (quality === 'degraded') ElMessage.warning('录音完成，但电平异常（削波或中断），已标记 degraded')
+    else ElMessage.warning('录音完成，但未采到有效声音，请检查麦克风')
+    if (audioVisible.value) await refreshAudio()
   } catch (error) { ElMessage.error(apiErrorMessage(error, '音频采集失败')) }
   finally { audioBusy.value = false }
+}
+
+async function refreshAudio() {
+  audioLoading.value = true
+  audioError.value = ''
+  try {
+    const value = unwrap(await listMediaAssets({ mediaType: 'audio', limit: 20 }), {})
+    audioAssets.value = value.items || []
+    audioTotal.value = value.total || audioAssets.value.length
+  } catch (error) { audioError.value = apiErrorMessage(error, '录音列表读取失败') }
+  finally { audioLoading.value = false }
+}
+
+function openAudioPanel() {
+  audioVisible.value = true
+  refreshAudio()
+}
+
+async function playAudio(asset) {
+  // <audio> 的 src 请求不带登录态，统一先以 blob 拉取再交给播放器。
+  if (audioUrl.value) { URL.revokeObjectURL(audioUrl.value); audioUrl.value = '' }
+  audioPlaying.value = asset.assetId
+  try {
+    audioUrl.value = await loadAudioUrl(asset.assetId)
+    if (audioRef.value) { audioRef.value.src = audioUrl.value; audioRef.value.play() }
+  } catch (error) { ElMessage.error(apiErrorMessage(error, '录音加载失败')) }
+  finally { audioPlaying.value = '' }
+}
+
+async function saveAudio(asset) {
+  try { await downloadMediaAsset(asset.assetId) }
+  catch (error) { ElMessage.error(apiErrorMessage(error, '录音下载失败')) }
+}
+
+function qualityTag(state) {
+  return { valid: 'success', degraded: 'warning', invalid: 'danger' }[state] || 'info'
+}
+function qualityLabel(state) {
+  return { valid: '正常', degraded: '电平异常', invalid: '无效' }[state] || state
 }
 async function lift(action) {
   liftBusy.value = action
@@ -148,7 +203,11 @@ onMounted(async () => {
   restoring.value = false
   timer = window.setInterval(() => { if (active.value || statusError.value) poll() }, 2000)
 })
-onBeforeUnmount(() => { disposed = true; if (timer) window.clearInterval(timer) })
+onBeforeUnmount(() => {
+  disposed = true
+  if (timer) window.clearInterval(timer)
+  if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
+})
 </script>
 
 <template>
@@ -167,7 +226,8 @@ onBeforeUnmount(() => { disposed = true; if (timer) window.clearInterval(timer) 
           </el-checkbox>
         </el-checkbox-group>
         <div class="controls">
-          <el-button :icon="Microphone" :loading="audioBusy" @click="captureAudio">采集 3 秒音频</el-button>
+          <el-button :icon="Microphone" :loading="audioBusy" :disabled="restoring" @click="captureAudio">采集 {{ AUDIO_DURATION }} 秒音频</el-button>
+          <el-button :disabled="restoring" @click="openAudioPanel">录音记录</el-button>
           <el-button :icon="Top" :loading="liftBusy === 'up'" :disabled="Boolean(liftBusy)" @click="lift('up')">升起</el-button>
           <el-button :icon="Bottom" :loading="liftBusy === 'down'" :disabled="Boolean(liftBusy)" @click="lift('down')">下降</el-button>
           <el-button type="danger" plain @click="lift('stop')">停止升降</el-button>
@@ -211,6 +271,31 @@ onBeforeUnmount(() => { disposed = true; if (timer) window.clearInterval(timer) 
       </el-table>
       <template #footer><el-button @click="openResults">刷新文件夹</el-button><el-button @click="folderVisible = false">关闭</el-button></template>
     </el-dialog>
+    <el-dialog v-model="audioVisible" title="录音记录" width="min(720px, 94vw)">
+      <el-alert v-if="audioError" :title="audioError" type="error" :closable="false" />
+      <el-table v-loading="audioLoading" :data="audioAssets" size="small">
+        <el-table-column label="时间" width="170"><template #default="{ row }">{{ (row.capturedAt || '').replace('T', ' ').slice(0, 19) }}</template></el-table-column>
+        <el-table-column prop="fileName" label="文件" min-width="180" show-overflow-tooltip />
+        <el-table-column label="大小" width="90"><template #default="{ row }">{{ ((row.sizeBytes || 0) / 1024).toFixed(0) }} KB</template></el-table-column>
+        <el-table-column label="质量" width="100">
+          <template #default="{ row }"><el-tag size="small" :type="qualityTag(row.qualityState)">{{ qualityLabel(row.qualityState) }}</el-tag></template>
+        </el-table-column>
+        <el-table-column label="操作" width="140">
+          <template #default="{ row }">
+            <el-button link type="primary" :loading="audioPlaying === row.assetId" @click="playAudio(row)">试听</el-button>
+            <el-button link type="primary" @click="saveAudio(row)">下载</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="audio-player">
+        <audio v-if="audioVisible" ref="audioRef" controls :src="audioUrl || undefined" style="width: 100%"></audio>
+        <p v-else-if="!audioLoading && !audioAssets.length" class="config-note">暂无录音，点击「采集 {{ AUDIO_DURATION }} 秒音频」开始</p>
+      </div>
+      <template #footer>
+        <el-button @click="refreshAudio">刷新</el-button>
+        <el-button @click="audioVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -230,6 +315,7 @@ h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .preview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .preview-grid.single { grid-template-columns: 1fr; }
 .preview-grid.eight { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.audio-player { margin-top: 12px; }
 .folder-path { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .folder-path code { flex: 1; overflow-wrap: anywhere; }
 @media (max-width: 1200px) { .preview-grid.eight { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
