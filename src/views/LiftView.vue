@@ -9,7 +9,7 @@ import AsyncSection from '@/components/AsyncSection.vue'
 import MetricCard from '@/components/MetricCard.vue'
 import { unwrap } from '@/api/envelope'
 import {
-  clearLiftFault, enableLift, getLiftState, homeLift, moveLift, moveLiftTo, setLiftParams, stopLift
+  clearLiftFault, enableLift, getLiftState, homeLift, moveLift, moveLiftTo, resetEmergency, setLiftParams, stopLift
 } from '@/api/safety'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useAsyncTask } from '@/composables/useAsyncTask'
@@ -180,6 +180,16 @@ onBeforeUnmount(() => {
           @click="confirmThen('stop', '急停会同时停止底盘运动与升降设备，确认执行？', () => send('stop', () => stopLift(), '急停指令已下发'))"
         >
           急停
+        </el-button>
+        <!-- 急停是锁存状态：不复位则升降/底盘一直拒绝指令（云台除外）。 -->
+        <el-button
+          type="warning"
+          plain
+          :icon="RefreshLeft"
+          :loading="pendingKey === 'reset'"
+          @click="confirmThen('reset', '复位会解除急停锁，升降与底盘将重新接受指令。确认现场已安全？', () => send('reset', () => resetEmergency(), '急停已复位'))"
+        >
+          急停复位
         </el-button>
       </template>
     </PageHeader>

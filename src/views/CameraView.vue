@@ -29,6 +29,7 @@ import { useAsyncTask } from '@/composables/useAsyncTask'
 import { useCameraStream } from '@/composables/useCameraStream'
 import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 import { formatTime } from '@/utils/format'
+import { ptzSpeedRatio } from '@/utils/cameraControl'
 import { getErrorMessage } from '@/utils/request'
 import { configuredRecordingsDir, openLocalFolder } from '@/utils/localFolder'
 
@@ -45,7 +46,7 @@ const PTZ_DIRECTIONS = [
 
 const presets = ref([])
 const currentPresetId = ref(null)
-const speed = ref(1)
+const speed = ref(30)
 const frameSrc = ref('')
 let framePending = false
 let pageDisposed = false
@@ -218,7 +219,7 @@ stream.onMessage((message) => {
 onBeforeUnmount(() => {
   pageDisposed = true
   // 卸载前先停转：按着方向键切走页面时，相机不能继续转。
-  if (ptzActive.value) ptzContinuous('stop', speed.value).catch(() => {})
+  if (ptzActive.value) ptzContinuous('stop', 0).catch(() => {})
   if (frameSrc.value) URL.revokeObjectURL(frameSrc.value)
   if (timer) window.clearInterval(timer)
   if (statusTimer) window.clearInterval(statusTimer)
@@ -244,9 +245,16 @@ async function ptzStart(direct) {
     return
   }
   if (ptzActive.value) return
+  let speedRatio
+  try {
+    speedRatio = ptzSpeedRatio(speed.value)
+  } catch (reason) {
+    ElMessage.error(getErrorMessage(reason, '云台速度参数无效'))
+    return
+  }
   ptzActive.value = direct
   lastAction.value = `云台向${ptzDirectionLabel(direct)}`
-  ptzStartPromise = ptzContinuous(direct, speed.value).catch((reason) => {
+  ptzStartPromise = ptzContinuous(direct, speedRatio).catch((reason) => {
     ElMessage.error(getErrorMessage(reason, '云台指令下发失败'))
     if (ptzActive.value === direct) ptzActive.value = ''
   })
@@ -266,7 +274,7 @@ async function ptzStop() {
   }
   ptzStartPromise = null
   try {
-    await ptzContinuous('stop', speed.value)
+    await ptzContinuous('stop', 0)
   } catch (reason) {
     ElMessage.error(getErrorMessage(reason, '云台停止指令下发失败'))
   }
@@ -493,9 +501,9 @@ function onFrameError() {
       <section class="view-panel camera-controls">
         <div class="view-panel__head">
           <h2>云台控制</h2>
-          <small>速度范围 1–120</small>
+          <small>速度范围 1–100%</small>
         </div>
-        <el-slider v-model="speed" :min="1" :max="120" show-input :show-input-controls="false" />
+        <el-slider v-model="speed" :min="1" :max="100" :format-tooltip="(value) => `${value}%`" show-input :show-input-controls="false" />
 
         <!-- 按住转动 / 松开停止：不再需要用户额外记得点「停止」 -->
         <div class="ptz-pad" role="group" aria-label="云台方向控制">
@@ -531,7 +539,7 @@ function onFrameError() {
           type="info"
           :closable="false"
           show-icon
-          :title="`方向值按设备协议下发（direct=${PTZ_DIRECTIONS.map((item) => item.direct).join(' / ')}），当前速度 ${speed}。`"
+          :title="`方向值按设备协议下发（direct=${PTZ_DIRECTIONS.map((item) => item.direct).join(' / ')}），当前速度 ${speed}%。`"
         />
       </section>
     </div>

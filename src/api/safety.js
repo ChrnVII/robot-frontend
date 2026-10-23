@@ -5,14 +5,38 @@
 //   POST   /api/v1/emergency-stop                急停
 //   POST   /api/v1/media/captures                抓图 / 录音
 //   GET    /api/v1/devices/lift/state            升降设备状态
-// 所有设备命令都携带未过期租约；409 时作废租约并由下一次命令重试。
-import request from '@/utils/request'
+// 普通设备命令携带有效租约；停止动作无租约，且只在租约失效时刷新重试一次。
+import request, { ApiError } from '@/utils/request'
 import { createId, unwrap, unwrapRows } from './envelope'
+import { cameraCommandError } from '@/utils/cameraControl'
+import { createControlLeaseCache } from '@/utils/controlLease'
 
 const ISSUER = import.meta.env.VITE_CONTROL_HOLDER || 'robot-console'
-const COMMAND_TTL_MS = 1000
-let leaseId = ''
-let leaseMode = ''
+const STOP_LEASE_ID = 'stop-without-lease'
+const CAMERA_EMERGENCY_LEASE_ID = 'camera-emergency-bypass'
+
+const controlLease = createControlLeaseCache({
+  acquire: async (mode) => {
+    const response = await request({
+      url: '/api/v1/control/leases',
+      method: 'post',
+      data: { holder: ISSUER, mode }
+    })
+    const lease = unwrap(response, {})
+    if (!lease?.leaseId && !lease?.id) {
+      throw new ApiError('后端未返回控制租约 leaseId，无法下发设备命令', {
+        type: 'business', code: 'LEASE_MISSING'
+      })
+    }
+    return lease
+  },
+  release: (leaseId, reason) => request({
+    url: `/api/v1/control/leases/${encodeURIComponent(leaseId)}`,
+    method: 'delete',
+    params: { reason }
+  }),
+  defaultTtlMs: 3000
+})
 
 function finiteNumber(...values) {
   const value = values.find((item) => item !== undefined && item !== null && item !== '')
@@ -20,36 +44,24 @@ function finiteNumber(...values) {
   return Number.isFinite(number) ? number : undefined
 }
 
-async function acquireLease(mode = 'manual_local') {
-  const response = await request({
-    url: '/api/v1/control/leases',
-    method: 'post',
-    data: { holder: ISSUER, mode }
-  })
-  const lease = unwrap(response, {})
-  const id = lease?.leaseId || lease?.id || ''
-  if (!id) throw new Error('后端未返回控制租约 leaseId，无法下发设备命令')
-  leaseId = id
-  leaseMode = mode
-  return leaseId
-}
-
-export async function ensureLease(mode = 'manual_local') {
-  if (leaseId && leaseMode === mode) return leaseId
-  if (leaseId) await releaseControlLease('mode_changed')
-  return acquireLease(mode)
+export function ensureLease(mode = 'manual_local') {
+  return controlLease.ensure(mode)
 }
 
 export function releaseControlLease(reason = 'released') {
-  if (!leaseId) return Promise.resolve(null)
-  const current = leaseId
-  leaseId = ''
-  leaseMode = ''
-  return request({
-    url: `/api/v1/control/leases/${encodeURIComponent(current)}`,
-    method: 'delete',
-    params: { reason }
-  })
+  return controlLease.release(reason)
+}
+
+/**
+ * 是否是「租约失配」导致的拒绝——只有这一类才值得刷新租约后重试。
+ *
+ * 后端把 rejected 统一回 409，其中也包含设备自己拒绝（相机 401/400 等）：
+ * 那类重发一次同样会失败，还会让设备多收一条命令，因此必须排除。
+ */
+function isLeaseRejection(error) {
+  const status = Number(error?.status ?? error?.response?.status)
+  if (status !== 409) return false
+  return /lease/i.test(String(error?.message || ''))
 }
 
 /**
@@ -60,30 +72,44 @@ export function releaseControlLease(reason = 'released') {
  * @param {string} mode 控制模式，默认 manual_local。
  */
 export async function sendDeviceCommand(target, action, payload = {}, mode = 'manual_local') {
-  const activeLease = await ensureLease(mode)
-  const now = Date.now()
-  try {
-    return await request({
-      url: '/api/v1/devices/commands',
-      method: 'post',
-      data: {
-        target,
-        action,
-        issuer: ISSUER,
-        leaseId: activeLease,
-        idempotencyKey: createId('ui-command'),
-        traceId: createId('trace'),
-        payload,
-        issuedAt: new Date(now).toISOString(),
-        expiresAt: new Date(now + COMMAND_TTL_MS).toISOString()
+  const stop = action === 'stop' || (
+    target === 'camera' && action === 'camera.ptz'
+    && String(payload?.direct || '').toLowerCase() === 'stop'
+  )
+  const traceId = createId('trace')
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let activeLease = STOP_LEASE_ID
+    if (!stop) {
+      try {
+        activeLease = await ensureLease(mode)
+      } catch (error) {
+        if (target !== 'camera') throw error
+        // 急停期间普通租约已被抢占：交给 robot-core 决定无租约的相机命令是否放行。
+        activeLease = CAMERA_EMERGENCY_LEASE_ID
       }
-    })
-  } catch (error) {
-    if (Number(error?.status ?? error?.response?.status) === 409) {
-      leaseId = ''
-      leaseMode = ''
     }
-    throw error
+    try {
+      return await request({
+        url: '/api/v1/devices/commands',
+        method: 'post',
+        data: {
+          target,
+          action,
+          issuer: ISSUER,
+          leaseId: activeLease,
+          idempotencyKey: createId('ui-command'),
+          traceId,
+          payload
+          // issuedAt / expiresAt 不传：由服务端盖章，避免浏览器与机器人时钟漂移
+          // 导致所有命令以 command_expired 被拒。
+        }
+      })
+    } catch (error) {
+      if (!isLeaseRejection(error)) throw error
+      if (!stop) await controlLease.invalidate(activeLease)
+      if (attempt === 1) throw error
+    }
   }
 }
 
@@ -93,6 +119,20 @@ export function emergencyStop(reason = 'operator_pressed_stop') {
     url: '/api/v1/emergency-stop',
     method: 'post',
     data: { traceId: createId('trace-estop'), reason }
+  })
+}
+
+/**
+ * 解除急停锁。
+ *
+ * 急停是**锁存**语义：不清除之前，robot-core 会一直拒绝升降/底盘/任务命令
+ * （云台是唯一豁免的设备）。复位本身不依赖普通租约——急停期间普通租约已被抢占。
+ */
+export function resetEmergency(reason = 'operator_reset') {
+  return request({
+    url: '/api/v1/control/emergency-reset',
+    method: 'post',
+    data: { traceId: createId('trace-reset'), reason }
   })
 }
 
@@ -188,17 +228,25 @@ export async function listCameraPresets(params = {}) {
 }
 
 export function saveCameraPreset(presetId) {
-  return request({
-    url: '/api/v1/cam/presets',
-    method: 'post',
-    data: { id: Number(presetId) }
+  const id = Number(presetId)
+  return sendDeviceCommand('camera', 'camera.save_preset', { preset: id }).then(async (response) => {
+    await request({
+      url: '/api/v1/cam/presets',
+      method: 'post',
+      data: { id }
+    })
+    return response
   })
 }
 
 export function deleteCameraPreset(presetId) {
-  return request({
-    url: `/api/v1/cam/presets/${encodeURIComponent(presetId)}`,
-    method: 'delete'
+  const id = Number(presetId)
+  return sendDeviceCommand('camera', 'camera.delete_preset', { preset: id }).then(async (response) => {
+    await request({
+      url: `/api/v1/cam/presets/${encodeURIComponent(id)}`,
+      method: 'delete'
+    })
+    return response
   })
 }
 
@@ -208,6 +256,11 @@ export function gotoCameraPreset(presetId) {
 
 export function ptzContinuous(direction, speed = 1) {
   return sendDeviceCommand('camera', 'camera.ptz', { direct: direction, speed: Number(speed) })
+    .then((response) => {
+      const failure = cameraCommandError(unwrap(response, {}))
+      if (failure) throw new ApiError(failure, { type: 'business', code: 'COMMAND_REJECTED' })
+      return response
+    })
 }
 
 export function rebootCamera(presetId) {

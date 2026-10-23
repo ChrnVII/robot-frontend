@@ -15,15 +15,17 @@ export function createRequestId(prefix = 'trace') {
 }
 
 export class ApiError extends Error {
-  constructor(message, { type = 'http', status = 0, code = '', traceId = '', cause } = {}) {
+  constructor(message, { type = 'http', status = 0, code = '', traceId = '', data = null, cause } = {}) {
     super(message, { cause })
     this.name = 'ApiError'
     this.type = type
     this.status = status
     this.code = code
     this.traceId = traceId
+    // 后端错误封套里的 data（例如被拒命令的 state/rejectReason），供调用方判定是否可重试。
+    this.data = data
     // 兼容 axios / Element Plus 组件里常见的 error.response 读取方式。
-    this.response = { status, data: { code, message, traceId } }
+    this.response = { status, data: { code, message, traceId, data } }
   }
 }
 
@@ -78,7 +80,7 @@ service.interceptors.response.use(
       const message = body.message || body.msg || '后端返回了业务失败'
       return Promise.reject(new ApiError(
         body.code ? `${message}（${body.code}）` : message,
-        { type: 'business', status: response.status, code: body.code, traceId: body.traceId || traceId }
+        { type: 'business', status: response.status, code: body.code, traceId: body.traceId || traceId, data: body.data }
       ))
     }
     return response
@@ -103,7 +105,7 @@ service.interceptors.response.use(
     const message = body?.message || body?.msg || httpStatusMessage(status)
     return Promise.reject(new ApiError(
       body?.code ? `${message}（${body.code}）` : message,
-      { type: 'http', status, code: body?.code, traceId, cause: error }
+      { type: 'http', status, code: body?.code, traceId, data: body?.data, cause: error }
     ))
   }
 )
