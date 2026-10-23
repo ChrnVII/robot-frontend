@@ -55,7 +55,9 @@ export function captureMedia(data) {
   return request({
     url: '/api/v1/media/captures',
     method: 'post',
-    data
+    data,
+    // 录音默认 10 秒 + 编码/落库，必须放宽前端默认的 10s 超时。
+    timeout: 60000
   })
 }
 
