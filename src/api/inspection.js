@@ -137,17 +137,7 @@ export function stopInspectionLift() {
   return emergencyStop({ traceId: createId('trace-estop'), reason: 'operator_pressed_lift_stop' })
 }
 
-export function getInspectionFiles(taskRunId) {
-  return request({ url: '/api/v1/inspections/' + encodeURIComponent(taskRunId) + '/files', method: 'get' })
-}
-
-export async function downloadInspectionFile(taskRunId, name) {
-  const response = await request({ url: '/api/v1/inspections/' + encodeURIComponent(taskRunId) + '/files/' + encodeURIComponent(name),
-    method: 'get', responseType: 'blob', timeout: 0 })
-  const url = URL.createObjectURL(response.data)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = name
-  link.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+/** 在后端所在主机的系统文件管理器中打开本次任务目录。 */
+export function openInspectionFolder(taskRunId) {
+  return request({ url: '/api/v1/inspections/' + encodeURIComponent(taskRunId) + '/open', method: 'post' })
 }

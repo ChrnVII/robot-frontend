@@ -7,11 +7,12 @@ import InspectionPreview from '@/components/InspectionPreview.vue'
 import { listCameras } from '@/api/cameras'
 import { unwrap, apiErrorMessage } from '@/api/envelope'
 import { captureMedia, getInspectionConfig, getInspectionStatus, startInspection, stopInspection,
-  moveInspectionLift, stopInspectionLift, getInspectionFiles, downloadInspectionFile } from '@/api/inspection'
+  moveInspectionLift, stopInspectionLift, openInspectionFolder } from '@/api/inspection'
 import { listMediaAssets, loadAudioUrl, downloadMediaAsset } from '@/api/media'
-import { copyText } from '@/utils/localFolder'
+import { openLocalFolder } from '@/utils/localFolder'
 
-const AUDIO_DURATION = 10 // 与后端冻结参数一致（44.1kHz/单声道/10s），不随请求覆盖
+// 与后端冻结参数一致（44.1kHz / 单声道 / 10 秒）：前端只负责触发，不下发参数覆盖。
+const AUDIO_DURATION = 10
 
 const TASK_KEY = 'inspection-robot.active-inspection'
 const SELECTION_KEY = 'inspection-robot.selected-cameras'
@@ -33,12 +34,7 @@ const audioUrl = ref('')    // 当前 <audio> 的 object URL
 const audioRef = ref(null)  // <audio> 元素
 const audioTotal = ref(0)
 const liftBusy = ref('')
-const folderVisible = ref(false)
-const files = ref([])
-const filesLoading = ref(false)
-const filesError = ref('')
-const folderPath = ref('')
-const fileBusy = ref('')
+const openingFolder = ref(false)
 const active = computed(() => ['starting', 'running', 'stopping'].includes(task.value.state))
 const stateLabel = computed(() => ({ idle: '等待启动', starting: '启动中', running: '检测进行中', stopping: '正在收尾', stopped: '已停止', completed: '已完成', failed: '失败' }[task.value.state] || task.value.state))
 const previewIds = computed(() => active.value ? task.value.cameraIds || [] : [])
@@ -106,14 +102,13 @@ async function captureAudio() {
     const value = unwrap(await captureMedia({ taskRunId: task.value.taskRunId || 'manual-' + Date.now(),
       waypointId: 'inspection-audio', deviceId: 'audio', mediaType: 'audio' }), {})
     const quality = value?.qualityState || 'valid'
-    if (quality === 'valid') ElMessage.success('录音完成（10 秒）')
+    if (quality === 'valid') ElMessage.success(`录音完成（${AUDIO_DURATION} 秒）`)
     else if (quality === 'degraded') ElMessage.warning('录音完成，但电平异常（削波或中断），已标记 degraded')
     else ElMessage.warning('录音完成，但未采到有效声音，请检查麦克风')
     if (audioVisible.value) await refreshAudio()
   } catch (error) { ElMessage.error(apiErrorMessage(error, '音频采集失败')) }
   finally { audioBusy.value = false }
 }
-
 async function refreshAudio() {
   audioLoading.value = true
   audioError.value = ''
@@ -124,12 +119,10 @@ async function refreshAudio() {
   } catch (error) { audioError.value = apiErrorMessage(error, '录音列表读取失败') }
   finally { audioLoading.value = false }
 }
-
 function openAudioPanel() {
   audioVisible.value = true
   refreshAudio()
 }
-
 async function playAudio(asset) {
   // <audio> 的 src 请求不带登录态，统一先以 blob 拉取再交给播放器。
   if (audioUrl.value) { URL.revokeObjectURL(audioUrl.value); audioUrl.value = '' }
@@ -140,12 +133,10 @@ async function playAudio(asset) {
   } catch (error) { ElMessage.error(apiErrorMessage(error, '录音加载失败')) }
   finally { audioPlaying.value = '' }
 }
-
 async function saveAudio(asset) {
   try { await downloadMediaAsset(asset.assetId) }
   catch (error) { ElMessage.error(apiErrorMessage(error, '录音下载失败')) }
 }
-
 function qualityTag(state) {
   return { valid: 'success', degraded: 'warning', invalid: 'danger' }[state] || 'info'
 }
@@ -159,25 +150,28 @@ async function lift(action) {
   finally { liftBusy.value = '' }
 }
 async function openResults() {
-  folderVisible.value = true
-  filesLoading.value = true
-  filesError.value = ''
+  if (openingFolder.value || !task.value.taskRunId) return
+  openingFolder.value = true
   try {
-    const result = unwrap(await getInspectionFiles(task.value.taskRunId), {})
-    folderPath.value = result.dir || task.value.outputDir || ''
-    files.value = result.files || []
-  } catch (error) { filesError.value = apiErrorMessage(error, '任务文件夹读取失败') }
-  finally { filesLoading.value = false }
-}
-async function download(name) {
-  fileBusy.value = name
-  try { await downloadInspectionFile(task.value.taskRunId, name) }
-  catch (error) { ElMessage.error(apiErrorMessage(error, '文件下载失败')) }
-  finally { fileBusy.value = '' }
-}
-async function copyFolder() {
-  if (await copyText(folderPath.value)) ElMessage.success('任务目录已复制')
-  else ElMessage.warning('复制失败，请手动复制目录')
+    const result = unwrap(await openInspectionFolder(task.value.taskRunId), {})
+    if (result.opened) {
+      ElMessage.success(`已打开检测结果目录：${result.dir}`)
+      return
+    }
+    // 与球形摄像页面一致：服务端无桌面会话时尝试本机打开，并复制目录。
+    const target = String(result.dir || '').trim()
+    if (!target) throw new Error('后端未返回本次任务目录')
+    const { opened, copied } = await openLocalFolder(target)
+    ElMessage({
+      type: opened ? 'success' : 'warning',
+      message: opened
+        ? `已请求打开检测结果目录：${target}${copied ? '；若浏览器拦截，路径已复制' : ''}`
+        : copied ? `无法直接打开系统文件夹，路径已复制，请粘贴到资源管理器地址栏：${target}`
+          : `无法直接打开系统文件夹，请手动打开：${target}`,
+      duration: 8000
+    })
+  } catch (error) { ElMessage.error(apiErrorMessage(error, '打开检测结果目录失败')) }
+  finally { openingFolder.value = false }
 }
 onMounted(async () => {
   try {
@@ -254,23 +248,13 @@ onBeforeUnmount(() => {
     <el-alert v-for="error in errors" :key="error" :title="error" type="warning" :closable="false" />
     <el-card shadow="never" class="results-card">
       <template #header>
-        <div class="results-header"><h2>检测结果</h2><el-button :icon="FolderOpened" :disabled="!task.taskRunId" @click="openResults">打开检测结果</el-button></div>
+        <div class="results-header"><h2>检测结果</h2><el-button :icon="FolderOpened" :loading="openingFolder" :disabled="!task.taskRunId" @click="openResults">打开检测结果</el-button></div>
       </template>
       <div v-if="previewIds.length" class="preview-grid" :class="{ single: previewIds.length === 1, eight: previewIds.length > 4 }">
         <InspectionPreview v-for="id in previewIds" :key="task.taskRunId + ':' + id" :task-run-id="task.taskRunId" :camera-id="id" />
       </div>
       <el-empty v-else :description="task.taskRunId ? '任务已结束，可打开本次任务文件夹查看录像与检测记录' : '启动检测后显示实时视频预览'" />
     </el-card>
-    <el-dialog v-model="folderVisible" title="本次任务文件夹" width="min(760px, 94vw)">
-      <div class="folder-path"><code>{{ folderPath }}</code><el-button size="small" :disabled="!folderPath" @click="copyFolder">复制路径</el-button></div>
-      <el-alert v-if="filesError" :title="filesError" type="error" :closable="false" />
-      <el-table v-loading="filesLoading" :data="files">
-        <el-table-column prop="name" label="文件" />
-        <el-table-column label="大小"><template #default="{ row }">{{ (row.size / 1048576).toFixed(2) }} MB</template></el-table-column>
-        <el-table-column label="操作"><template #default="{ row }"><el-button link type="primary" :loading="fileBusy === row.name" :disabled="row.writing" @click="download(row.name)">{{ row.writing ? '正在写入' : '下载' }}</el-button></template></el-table-column>
-      </el-table>
-      <template #footer><el-button @click="openResults">刷新文件夹</el-button><el-button @click="folderVisible = false">关闭</el-button></template>
-    </el-dialog>
     <el-dialog v-model="audioVisible" title="录音记录" width="min(720px, 94vw)">
       <el-alert v-if="audioError" :title="audioError" type="error" :closable="false" />
       <el-table v-loading="audioLoading" :data="audioAssets" size="small">
@@ -316,8 +300,6 @@ h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .preview-grid.single { grid-template-columns: 1fr; }
 .preview-grid.eight { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .audio-player { margin-top: 12px; }
-.folder-path { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-.folder-path code { flex: 1; overflow-wrap: anywhere; }
 @media (max-width: 1200px) { .preview-grid.eight { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 800px) { .setup-grid, .preview-grid, .preview-grid.eight { grid-template-columns: 1fr; } }
 </style>
