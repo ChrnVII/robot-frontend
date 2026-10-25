@@ -27,6 +27,9 @@
 - **预览**：`/ws/inspections/{taskRunId}/cameras/{cameraId}` 二进制帧 + 浏览器 WebCodecs 硬解，
   叠加框走同一条 WS 的 `{"t":"det"}` JSON。需要安全上下文（HTTPS 或 localhost），
   否则页面只显示具体原因、不出画面。
+- **预览渲染**：解码输出只保留最新一帧、随到随画（按子码流源帧率）；
+  canvas 背板按显示尺寸分配（不高于源分辨率），所有画面共用一个 `requestAnimationFrame`，
+  检测框只在结果到达或背板尺寸变化时重绘。
 - **状态**：运行期订阅 `/ws/inspections/{taskRunId}`（含每路 `cameraStats`），
   仅在 WS 连不上或反复断开时才退回 2 秒轮询 `GET /inspections/{taskRunId}`。
 

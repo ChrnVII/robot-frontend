@@ -681,7 +681,7 @@ function onFrameError() {
   display: block;
 }
 
-/* 画面层：canvas 的像素尺寸由解码帧决定，等比缩放铺满舞台。 */
+/* 画面层：canvas 背板按显示尺寸（DPR 上限 2）分配，不高于源分辨率，再等比铺满舞台。 */
 .camera-stage__canvas {
   position: absolute;
   inset: 0;

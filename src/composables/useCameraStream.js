@@ -7,8 +7,8 @@
 //      绝不排队，避免「越播越慢」；
 //   2. 积压即丢 + 关键帧重同步：decodeQueueSize 超过阈值就丢到下一个关键帧，
 //      解码器出错则标记 needReset，等下一个关键帧重建；
-//   3. 不可用时如实降级：非安全上下文 / 无 WebCodecs / 后端未启用时 mode 变为
-//      'fallback'，由页面回退到已有的 JPEG 轮询，画面始终有东西。
+//   3. 不可用时如实降级：非安全上下文 / 无 WebCodecs / 后端通道异常时 mode 变为
+//      'fallback'，页面据此显示具体原因；实时预览只有 WebCodecs 这一条通道。
 import { computed, onBeforeUnmount, reactive, readonly, ref } from 'vue'
 import {
   FRAME_FLAG,
@@ -20,6 +20,28 @@ import {
 const RECONNECT_MIN_DELAY = 1000
 const RECONNECT_MAX_DELAY = 15000
 const MAX_DECODE_QUEUE = 8        // 解码队列积压阈值，超过只收关键帧
+
+// 所有预览实例共用一个 rAF。8 路各开一个循环等于每秒几百次回调，
+// 事件循环被切碎后，解码与绘制的抖动都会被放大。
+const painters = new Set()
+let sharedFrame = null
+
+function scheduleFrame() {
+  if (sharedFrame !== null) return
+  sharedFrame = window.requestAnimationFrame(runFrame)
+}
+
+function runFrame(now) {
+  sharedFrame = null
+  for (const paint of painters) {
+    try {
+      paint(now)
+    } catch (error) {
+      console.error('[camera-stream] render failed', error)
+    }
+  }
+  if (painters.size) scheduleFrame()
+}
 
 export function useCameraStream(options = {}) {
   const mode = ref('idle')          // idle | webcodecs | fallback
@@ -42,7 +64,7 @@ export function useCameraStream(options = {}) {
   let decoder = null
   let videoContext = null
   let videoCanvas = null
-  let rafId = null
+  let painting = false
   let framePending = null
   let needReset = true
   let lastFrameAt = 0
@@ -57,7 +79,7 @@ export function useCameraStream(options = {}) {
   let onServerMessage = null
 
   const statusText = computed(() => {
-    if (mode.value === 'fallback') return blockReason.value || '已回退到 JPEG 轮询'
+    if (mode.value === 'fallback') return blockReason.value || '当前环境不支持实时预览'
     switch (phase.value) {
       case 'connecting': return '正在连接实时画面…'
       case 'waiting': return '等待摄像头画面…'
@@ -123,35 +145,55 @@ export function useCameraStream(options = {}) {
 
   /* ------------------------------ 渲染循环 ------------------------------ */
 
-  function paint() {
+  /**
+   * 画布背板按**显示尺寸**分配（上限源分辨率，DPR 最多算 2 倍）。
+   *
+   * 以前直接按 frame.displayWidth 分配：8 路 720p 就是 8 块 1280×720 的合成层，
+   * 而页面里每格可能只有几百像素宽 —— 相当于渲染了 7～9 倍的像素再缩下去。
+   */
+  function backingSize(sourceWidth, sourceHeight) {
+    const rect = videoCanvas.getBoundingClientRect()
+    const ratio = Math.min(window.devicePixelRatio || 1, 2)
+    const maxWidth = Math.max(1, Math.round((rect.width || sourceWidth) * ratio))
+    const maxHeight = Math.max(1, Math.round((rect.height || sourceHeight) * ratio))
+    const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight, 1)   // 不放大
+    return {
+      width: Math.max(1, Math.round(sourceWidth * scale)),
+      height: Math.max(1, Math.round(sourceHeight * scale))
+    }
+  }
+
+  function paint(now) {
     if (!videoContext || !videoCanvas) return
+    // 只画最新一帧：解码输出到达即覆盖 framePending，这里画完立刻 close。
     if (framePending) {
       const frame = framePending
       framePending = null
-      const width = frame.displayWidth
-      const height = frame.displayHeight
-      if (width && height && (videoCanvas.width !== width || videoCanvas.height !== height)) {
-        videoCanvas.width = width
-        videoCanvas.height = height
-      }
-      videoContext.drawImage(frame, 0, 0)
+      const sourceWidth = frame.displayWidth
+      const sourceHeight = frame.displayHeight
+      if (sourceWidth && sourceHeight) {
+        const { width, height } = backingSize(sourceWidth, sourceHeight)
+        if (videoCanvas.width !== width || videoCanvas.height !== height) {
+          videoCanvas.width = width
+          videoCanvas.height = height
+        }
+        videoContext.drawImage(frame, 0, 0, width, height)
 
-      const pts = Math.round(frame.timestamp / 1000)   // WebCodecs 用微秒，链路上是毫秒
-      options.onPaint?.(videoContext, pts, width, height)
+        const pts = Math.round(frame.timestamp / 1000)   // WebCodecs 用微秒，链路上是毫秒
+        options.onPaint?.(videoContext, pts, width, height)
+        lastFrameAt = now
+        resolution.width = sourceWidth
+        resolution.height = sourceHeight
+        metrics.decodedFrames += 1
+        if (timelineEpoch) {
+          const latency = Date.now() - (timelineEpoch + pts)
+          metrics.latencyMs = latency >= 0 && latency < 60000 ? latency : null
+        }
+        if (phase.value !== 'live') phase.value = 'live'
+      }
       frame.close()
-
-      lastFrameAt = performance.now()
-      resolution.width = width
-      resolution.height = height
-      metrics.decodedFrames += 1
-      if (timelineEpoch) {
-        const latency = Date.now() - (timelineEpoch + pts)
-        metrics.latencyMs = latency >= 0 && latency < 60000 ? latency : null
-      }
-      if (phase.value !== 'live') phase.value = 'live'
     }
 
-    const now = performance.now()
     if (phase.value === 'live' && now - lastFrameAt > 5000) {
       phase.value = 'waiting'
       metrics.latencyMs = null
@@ -163,14 +205,6 @@ export function useCameraStream(options = {}) {
       lastSampleAt = now
       metrics.decodeQueue = decoder ? decoder.decodeQueueSize : 0
     }
-  }
-
-  function renderLoop() {
-    if (disposed) return
-    rafId = window.requestAnimationFrame(() => {
-      paint()
-      renderLoop()
-    })
   }
 
   /* ------------------------------ WebSocket ------------------------------ */
@@ -205,7 +239,7 @@ export function useCameraStream(options = {}) {
       return
     }
     if (message.t === 'error') {
-      // 后端未启用低延迟预览：如实降级，由页面回退到 JPEG 轮询
+      // 后端不可用或浏览器禁用 WebCodecs：如实降级并显示原因
       blockReason.value = message.message || '后端未启用低延迟预览'
       mode.value = 'fallback'
       phase.value = 'stopped'
@@ -323,18 +357,29 @@ export function useCameraStream(options = {}) {
    *
    * 页面把 canvas 放在 AsyncSection 插槽里，加载态切换会把它整块卸载重挂；
    * 因此这里必须允许重复调用：画布换了只重新取上下文，已建立的 WS/解码器不动。
-   * WebCodecs 不可用时直接进入降级模式，由页面回退到 JPEG 轮询。
+   * WebCodecs 不可用时直接进入降级模式，由页面展示不可用原因。
    */
+  function startPainting() {
+    if (painting || disposed) return
+    painting = true
+    lastSampleAt = performance.now()
+    painters.add(paint)
+    scheduleFrame()
+  }
+
+  function stopPainting() {
+    if (!painting) return
+    painting = false
+    painters.delete(paint)
+  }
+
   function attach(videoElement) {
     if (!videoElement) return          // 插槽尚未渲染，等下一次触发
     videoCanvas = videoElement
     videoContext = videoCanvas.getContext('2d', { alpha: false, desynchronized: true })
 
     if (mode.value === 'webcodecs') {
-      if (rafId === null) {
-        lastSampleAt = performance.now()
-        renderLoop()
-      }
+      startPainting()
       return
     }
 
@@ -347,8 +392,7 @@ export function useCameraStream(options = {}) {
     }
     mode.value = 'webcodecs'
     phase.value = 'connecting'
-    lastSampleAt = performance.now()
-    renderLoop()
+    startPainting()
     connect()
   }
 
@@ -362,10 +406,7 @@ export function useCameraStream(options = {}) {
       try { decoder.close() } catch { /* 已关闭 */ }
       decoder = null
     }
-    if (rafId) {
-      window.cancelAnimationFrame(rafId)
-      rafId = null
-    }
+    stopPainting()
     videoContext = null
     videoCanvas = null
   }

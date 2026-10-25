@@ -98,6 +98,12 @@ const cameraStateMeta = state => ({
   waiting: { label: '连接中', type: 'info' },
   down: { label: '已停用', type: 'danger' }
 }[state] || { label: state || '未知', type: 'info' })
+// 检测频率随路数自动分档：现场看到检测变慢时要知道这是设计值，而不是卡死。
+const rateHint = computed(() => {
+  const capture = Number(task.value.captureFps) || 0
+  if (!capture) return ''
+  return `每路检测 ${capture}fps（按路数自动分档，录像与预览始终按源帧率）`
+})
 // 状态同步：优先用 /ws/inspections/{id} 推送（同一份 status），
 // 只有推送连不上或反复断开时才退回 2s 轮询，避免推送抖动时丢掉状态更新。
 const STATUS_WS_MAX_FAILURES = 3
@@ -448,6 +454,7 @@ onBeforeUnmount(() => {
       <template #header>
         <div class="results-header"><h2>检测结果</h2><el-button :icon="FolderOpened" :loading="openingFolder" :disabled="!task.taskRunId" @click="openResults">打开检测结果</el-button></div>
       </template>
+      <p v-if="rateHint" class="config-note">{{ rateHint }}</p>
       <div v-if="previewIds.length" class="preview-grid" :class="{ single: previewIds.length === 1, eight: previewIds.length > 4 }">
         <InspectionPreview v-for="id in previewIds" :key="task.taskRunId + ':' + id" :task-run-id="task.taskRunId" :camera-id="id" />
       </div>

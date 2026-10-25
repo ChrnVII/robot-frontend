@@ -11,6 +11,7 @@ const DETECTION_HOLD_MS = 3000
 let currentDetection = null
 let latestPts = -Infinity
 let clearTimer = null
+let lastSize = { width: 0, height: 0 }
 
 function clearOverlay() {
   if (clearTimer !== null) window.clearTimeout(clearTimer)
@@ -52,7 +53,11 @@ function drawOverlay(width = canvas.value?.width, height = canvas.value?.height)
 
 const stream = useCameraStream({
   url: () => getInspectionCameraUrl(props.taskRunId, props.cameraId),
+  // 视频帧只更新底板；检测框按结果到达重绘（1–5fps），不随视频帧整层重画。
+  // 这里只在背板尺寸变化时同步一次 overlay，避免两层的坐标比例错开。
   onPaint(_ctx, _pts, width, height) {
+    if (width === lastSize.width && height === lastSize.height) return
+    lastSize = { width, height }
     drawOverlay(width, height)
   }
 })
