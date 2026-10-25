@@ -22,6 +22,14 @@
 
 > 浏览器安全策略不允许 http(s) 页面导航到 `file://`，所以「打开目录」是尽力而为：能直开就直开，否则把路径复制到剪贴板并提示粘贴到资源管理器地址栏。若需要真正的“一键打开”，只能由同机的本地代理或桌面壳（Electron 等）承担。
 
+## 实时检测页的数据通道
+
+- **预览**：`/ws/inspections/{taskRunId}/cameras/{cameraId}` 二进制帧 + 浏览器 WebCodecs 硬解，
+  叠加框走同一条 WS 的 `{"t":"det"}` JSON。需要安全上下文（HTTPS 或 localhost），
+  否则页面只显示具体原因、不出画面。
+- **状态**：运行期订阅 `/ws/inspections/{taskRunId}`（含每路 `cameraStats`），
+  仅在 WS 连不上或反复断开时才退回 2 秒轮询 `GET /inspections/{taskRunId}`。
+
 ## Recommended IDE Setup
 
 [VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).

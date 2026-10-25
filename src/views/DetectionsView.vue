@@ -1,13 +1,14 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Microphone, VideoPlay, VideoPause, Top, Bottom } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import InspectionPreview from '@/components/InspectionPreview.vue'
 import { listCameras } from '@/api/cameras'
 import { unwrap, apiErrorMessage } from '@/api/envelope'
-import { captureMedia, getInspectionConfig, getInspectionStatus, startInspection, stopInspection,
-  moveInspectionLift, stopInspectionLift, openInspectionFolder } from '@/api/inspection'
+import { captureMedia, getInspectionConfig, getInspectionStatus, getInspectionStatusUrl,
+  startInspection, stopInspection, moveInspectionLift, stopInspectionLift,
+  openInspectionFolder } from '@/api/inspection'
 import { listMediaAssets, loadAudioUrl, downloadMediaAsset } from '@/api/media'
 import { openLocalFolder } from '@/utils/localFolder'
 
@@ -36,7 +37,7 @@ const audioTotal = ref(0)
 const liftBusy = ref('')
 const openingFolder = ref(false)
 const active = computed(() => ['starting', 'running', 'stopping'].includes(task.value.state))
-const stateLabel = computed(() => ({ idle: '等待启动', starting: '启动中', running: '检测进行中', stopping: '正在收尾', stopped: '已停止', completed: '已完成', failed: '失败' }[task.value.state] || task.value.state))
+const stateLabel = computed(() => ({ idle: '等待启动', starting: '启动中', running: '检测进行中', stopping: '正在收尾（写盘有超时保护）', stopped: '已停止', completed: '已完成', failed: '失败' }[task.value.state] || task.value.state))
 const previewIds = computed(() => active.value ? task.value.cameraIds || [] : [])
 // 后端只在 cameraErrors 里放真实故障（拒绝连接/鉴权失败/路径不存在）；
 // 同一路摄像头的主、子码流合并成一行，避免 4 路就刷出 8 条黄条。
@@ -69,9 +70,46 @@ const streamHint = computed(() => {
   }
   return ''
 })
-let timer = null
+// 被摘掉的路（启动超时/断流/连续推理失败）：单独成一组提示，与"还在连"区分开。
+const disabledAlerts = computed(() => Object.entries(task.value.cameraDisabled || {})
+  .map(([cameraId, reason]) => `${cameraId} 已停用：${reason}`))
+// 每路指标直接取自后端 camera_stats，多路排障看数字即可。
+const cameraRows = computed(() => {
+  const stats = task.value.cameraStats || {}
+  const disabled = task.value.cameraDisabled || {}
+  return Object.entries(stats).map(([cameraId, item]) => {
+    const sub = item.sub || {}
+    const main = item.main || {}
+    return {
+      cameraId,
+      state: disabled[cameraId] ? 'down' : (item.state || 'waiting'),
+      processed: Number(item.processed) || 0,
+      dropped: Number(item.overwrittenFrames) || 0,
+      stale: Number(item.staleFrames) || 0,
+      decodeErrors: Number(sub.decodeErrors) || 0,
+      packets: Number(main.packets) || 0,
+      sessions: Number(main.sessions) || 0,
+      note: disabled[cameraId] || ''
+    }
+  })
+})
+const cameraStateMeta = state => ({
+  live: { label: '正常', type: 'success' },
+  waiting: { label: '连接中', type: 'info' },
+  down: { label: '已停用', type: 'danger' }
+}[state] || { label: state || '未知', type: 'info' })
+// 状态同步：优先用 /ws/inspections/{id} 推送（同一份 status），
+// 只有推送连不上或反复断开时才退回 2s 轮询，避免推送抖动时丢掉状态更新。
+const STATUS_WS_MAX_FAILURES = 3
+const STATUS_POLL_INTERVAL = 2000
 let disposed = false
 let polling = false
+let statusSocket = null
+let statusTaskId = ''
+let statusFailures = 0
+let statusRetryTimer = null
+let pollTimer = null
+let statusWatchdog = null
 
 function remember() {
   try {
@@ -101,6 +139,96 @@ async function poll() {
     } else statusError.value = apiErrorMessage(error, '任务状态读取失败，正在重试')
   } finally { polling = false }
 }
+
+function closeStatusSocket() {
+  if (!statusSocket) return
+  const current = statusSocket
+  statusSocket = null
+  current.onopen = null
+  current.onmessage = null
+  current.onerror = null
+  current.onclose = null
+  try { current.close() } catch { /* 已关闭 */ }
+}
+
+function stopPolling() {
+  if (pollTimer) window.clearInterval(pollTimer)
+  pollTimer = null
+}
+
+function startPolling() {
+  if (pollTimer || disposed) return
+  pollTimer = window.setInterval(() => { if (active.value || statusError.value) poll() }, STATUS_POLL_INTERVAL)
+}
+
+function scheduleStatusReconnect() {
+  if (disposed || statusRetryTimer) return
+  const delay = Math.min(1000 * (2 ** statusFailures), 10000)
+  statusRetryTimer = window.setTimeout(() => {
+    statusRetryTimer = null
+    openStatusSocket()
+  }, delay)
+}
+
+function openStatusSocket() {
+  const id = task.value.taskRunId
+  if (disposed || !id) return
+  if (typeof WebSocket === 'undefined') { startPolling(); return }
+  closeStatusSocket()
+  let socket
+  try { socket = new WebSocket(getInspectionStatusUrl(id)) } catch { statusFailures += 1; startPolling(); return }
+  statusSocket = socket
+  socket.onopen = () => {
+    statusFailures = 0
+    stopPolling()          // 推送已就位，不必再轮询
+  }
+  socket.onmessage = event => {
+    let payload
+    try { payload = JSON.parse(event.data) } catch { return }
+    // 只认状态帧：hub 也会推错误/停止之类的事件，不能当成 status 写进页面。
+    const data = payload?.data ?? payload
+    const status = data?.status ?? data
+    if (!status || typeof status !== 'object' || !status.state) return
+    if (id !== task.value.taskRunId) return
+    applyStatus(status)
+    statusError.value = ''
+  }
+  socket.onerror = () => {}
+  socket.onclose = () => {
+    if (statusSocket === socket) statusSocket = null
+    if (disposed) return
+    statusFailures += 1
+    if (statusFailures >= STATUS_WS_MAX_FAILURES) { startPolling(); return }
+    scheduleStatusReconnect()
+  }
+}
+
+function openStatusChannel() {
+  const id = task.value.taskRunId
+  if (disposed || !id) return
+  if (typeof WebSocket === 'undefined') { startPolling(); return }
+  // 已经在订阅同一个任务就别重连（start() 与 active 监听都会调到这来）。
+  if (statusSocket && statusTaskId === id) return
+  statusTaskId = id
+  statusFailures = 0
+  openStatusSocket()
+  // 兜底：推送 8s 内没有任何消息（例如中间代理掐断长连接）就主动探一次。
+  if (!statusWatchdog) {
+    statusWatchdog = window.setInterval(() => {
+      if (disposed || !task.value.taskRunId) return
+      if (statusSocket && statusSocket.readyState === WebSocket.OPEN) return
+      startPolling()
+    }, 8000)
+  }
+}
+
+function stopStatusChannel() {
+  closeStatusSocket()
+  stopPolling()
+  statusTaskId = ''
+  if (statusRetryTimer) { window.clearTimeout(statusRetryTimer); statusRetryTimer = null }
+  if (statusWatchdog) { window.clearInterval(statusWatchdog); statusWatchdog = null }
+}
 function chooseCount(count) { selected.value = cameras.value.slice(0, count).map(item => item.id) }
 async function start() {
   if (active.value || busy.value || restoring.value) return
@@ -115,6 +243,7 @@ async function start() {
     task.value = { state: 'starting', cameraIds: [...selected.value], ...value }
     remember()
     statusError.value = ''
+    openStatusChannel()
     ElMessage.success('检测任务已启动')
   } catch (error) { ElMessage.error(apiErrorMessage(error, '检测启动失败')) }
   finally { busy.value = '' }
@@ -125,11 +254,22 @@ async function stop() {
   catch (error) { ElMessage.error(apiErrorMessage(error, '停止任务失败')) }
   finally { busy.value = '' }
 }
+// 没有进行中的任务时，本轮手动采集归到同一个「独立采集」编号，
+// 让多次采集的音频证据能按组归档。
+const standaloneRunId = ref('')
+function evidenceRunId() {
+  if (task.value.taskRunId) return task.value.taskRunId
+  if (!standaloneRunId.value) {
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    standaloneRunId.value = `standalone-${stamp}`
+  }
+  return standaloneRunId.value
+}
 async function captureAudio() {
   audioBusy.value = true
   try {
     // 参数不随请求下发：44.1kHz/单声道/10s 已在后端配置冻结，前端只触发。
-    const value = unwrap(await captureMedia({ taskRunId: task.value.taskRunId || 'manual-' + Date.now(),
+    const value = unwrap(await captureMedia({ taskRunId: evidenceRunId(),
       waypointId: 'inspection-audio', deviceId: 'audio', mediaType: 'audio' }), {})
     const quality = value?.qualityState || 'valid'
     if (quality === 'valid') ElMessage.success(`录音完成（${AUDIO_DURATION} 秒）`)
@@ -203,6 +343,12 @@ async function openResults() {
   } catch (error) { ElMessage.error(apiErrorMessage(error, '打开检测结果目录失败')) }
   finally { openingFolder.value = false }
 }
+// 任务进入终态后 3s 关掉推送：再留着只是让 worker 每 500ms 白跑一次 IPC。
+watch(active, (value, previous) => {
+  if (value) openStatusChannel()
+  else if (previous) window.setTimeout(() => { if (!active.value && !disposed) stopStatusChannel() }, 3000)
+})
+
 onMounted(async () => {
   try {
     const saved = JSON.parse(localStorage.getItem(SELECTION_KEY) || 'null')
@@ -225,11 +371,12 @@ onMounted(async () => {
   catch { /* 任务实际配置由后端校验 */ }
   if (disposed) return
   restoring.value = false
-  timer = window.setInterval(() => { if (active.value || statusError.value) poll() }, 2000)
+  // 先取一次完整状态，再订阅推送：刷新页面后能立刻看到当前进度。
+  if (task.value.taskRunId) openStatusChannel()
 })
 onBeforeUnmount(() => {
   disposed = true
-  if (timer) window.clearInterval(timer)
+  stopStatusChannel()
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
 })
 </script>
@@ -263,7 +410,10 @@ onBeforeUnmount(() => {
           <el-form-item label="任务名"><el-input v-model="form.taskName" maxlength="80" show-word-limit /></el-form-item>
           <el-form-item label="运行时长（秒，0 表示持续运行）"><el-input-number v-model="form.durationSeconds" :min="0" :max="86400" /></el-form-item>
         </el-form>
-        <p v-if="runtime.modelPath" class="config-note">模型：{{ runtime.modelPath }}</p>
+        <p v-if="runtime.modelPath" class="config-note">
+          模型：{{ runtime.modelPath }}<span v-if="runtime.modelDevice"> · 设备 {{ runtime.modelDevice }}</span>
+          <el-tag v-if="runtime.modelPath && runtime.modelEnabled === false" size="small" type="warning" effect="plain">未启用</el-tag>
+        </p>
         <p class="config-note">自动保存至 ./data/cams/日期时间-任务名/</p>
         <div class="controls">
           <el-button type="primary" :icon="VideoPlay" :loading="busy === 'start'" :disabled="active || restoring || Boolean(statusError)" @click="start">启动检测</el-button>
@@ -277,6 +427,23 @@ onBeforeUnmount(() => {
     <el-alert v-if="task.error" :title="task.error" type="error" :closable="false" />
     <el-alert v-if="streamHint" :title="streamHint" type="info" :closable="false" />
     <el-alert v-for="error in errors" :key="error" :title="error" type="warning" :closable="false" />
+    <el-alert v-for="error in disabledAlerts" :key="error" :title="error" type="error" :closable="false" />
+    <el-card v-if="cameraRows.length" shadow="never">
+      <template #header><div class="results-header"><h2>每路状态</h2><span class="config-note">后端 camera_stats 实时值</span></div></template>
+      <el-table :data="cameraRows" size="small">
+        <el-table-column prop="cameraId" label="相机" width="90" />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }"><el-tag size="small" :type="cameraStateMeta(row.state).type">{{ cameraStateMeta(row.state).label }}</el-tag></template>
+        </el-table-column>
+        <el-table-column prop="processed" label="已检测" width="80" />
+        <el-table-column prop="dropped" label="丢帧(覆盖)" width="100" />
+        <el-table-column prop="stale" label="过期帧" width="80" />
+        <el-table-column prop="decodeErrors" label="解码错误" width="90" />
+        <el-table-column prop="packets" label="主码流收包" width="100" />
+        <el-table-column prop="sessions" label="重连" width="70" />
+        <el-table-column prop="note" label="说明" min-width="180" show-overflow-tooltip />
+      </el-table>
+    </el-card>
     <el-card shadow="never" class="results-card">
       <template #header>
         <div class="results-header"><h2>检测结果</h2><el-button :icon="FolderOpened" :loading="openingFolder" :disabled="!task.taskRunId" @click="openResults">打开检测结果</el-button></div>

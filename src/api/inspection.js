@@ -42,6 +42,13 @@ export function getInspectionCameraUrl(taskRunId, cameraId) {
   return wsBaseUrl() + path + (token ? '?accessToken=' + encodeURIComponent(token) : '')
 }
 
+/** 任务状态推送（与 GET /inspections/{id} 同一份 status，省掉轮询）。 */
+export function getInspectionStatusUrl(taskRunId) {
+  const path = '/ws/inspections/' + encodeURIComponent(taskRunId)
+  const token = localStorage.getItem('access_token')
+  return wsBaseUrl() + path + (token ? '?accessToken=' + encodeURIComponent(token) : '')
+}
+
 /** 机器人和全部设备摘要，页面用它读取 8 路摄像头和麦克风的真实状态。 */
 export function getRobotState() {
   return request({
