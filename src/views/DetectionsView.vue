@@ -38,7 +38,37 @@ const openingFolder = ref(false)
 const active = computed(() => ['starting', 'running', 'stopping'].includes(task.value.state))
 const stateLabel = computed(() => ({ idle: '等待启动', starting: '启动中', running: '检测进行中', stopping: '正在收尾', stopped: '已停止', completed: '已完成', failed: '失败' }[task.value.state] || task.value.state))
 const previewIds = computed(() => active.value ? task.value.cameraIds || [] : [])
-const errors = computed(() => Object.entries(task.value.cameraErrors || {}).map(([id, error]) => id + '：' + error))
+// 后端只在 cameraErrors 里放真实故障（拒绝连接/鉴权失败/路径不存在）；
+// 同一路摄像头的主、子码流合并成一行，避免 4 路就刷出 8 条黄条。
+const errors = computed(() => {
+  const grouped = {}
+  for (const [key, message] of Object.entries(task.value.cameraErrors || {})) {
+    const [cameraId, kind] = String(key).split('/')
+    const line = kind === 'main' ? `主码流 ${message}` : kind === 'sub' ? `子码流 ${message}` : message
+    grouped[cameraId] = grouped[cameraId] ? `${grouped[cameraId]}；${line}` : line
+  }
+  return Object.entries(grouped).map(([id, message]) => id + '：' + message)
+})
+// "还没收到数据"不是故障：启动阶段只显示一条建连进度，运行中断流才提示重连。
+const streamHint = computed(() => {
+  const waiting = Object.entries(task.value.cameraWaiting || {})
+  if (!waiting.length) return ''
+  const cameraIds = rows => [...new Set(rows.map(([key]) => String(key).split('/')[0]))]
+  if (task.value.state === 'starting') {
+    const ready = Number(task.value.cameraReady) || 0
+    const total = Number(task.value.cameraTotal) || 0
+    const progress = total ? `${ready}/${total} 路已就绪` : '等待首个关键帧'
+    return `正在连接码流：${progress}，首次建连通常需要几秒（${cameraIds(waiting).join('、')}）`
+  }
+  if (task.value.state === 'running') {
+    // 2s 抖动很常见，运行中持续 3s 以上才值得提示，否则文案会一闪一闪。
+    const stalled = waiting.filter(([, value]) => (Number(value) || 0) >= 3)
+    if (!stalled.length) return ''
+    const seconds = Math.max(...stalled.map(([, value]) => Number(value) || 0))
+    return `${cameraIds(stalled).join('、')} 码流中断，正在重连（已 ${seconds.toFixed(1)}s）`
+  }
+  return ''
+})
 let timer = null
 let disposed = false
 let polling = false
@@ -245,6 +275,7 @@ onBeforeUnmount(() => {
     </div>
     <el-alert v-if="statusError" :title="statusError" type="warning" :closable="false" />
     <el-alert v-if="task.error" :title="task.error" type="error" :closable="false" />
+    <el-alert v-if="streamHint" :title="streamHint" type="info" :closable="false" />
     <el-alert v-for="error in errors" :key="error" :title="error" type="warning" :closable="false" />
     <el-card shadow="never" class="results-card">
       <template #header>
