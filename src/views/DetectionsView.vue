@@ -80,10 +80,13 @@ const cameraRows = computed(() => {
   return Object.entries(stats).map(([cameraId, item]) => {
     const sub = item.sub || {}
     const main = item.main || {}
+    const rate = cameraRates.value[cameraId] || {}
     return {
       cameraId,
       state: disabled[cameraId] ? 'down' : (item.state || 'waiting'),
       processed: Number(item.processed) || 0,
+      detectFps: rate.detectFps || 0,
+      decodeFps: rate.decodeFps || 0,
       dropped: Number(item.overwrittenFrames) || 0,
       stale: Number(item.staleFrames) || 0,
       decodeErrors: Number(sub.decodeErrors) || 0,
@@ -123,7 +126,50 @@ function remember() {
     localStorage.setItem(SELECTION_KEY, JSON.stringify(selected.value))
   } catch { /* 存储不可用不影响任务 */ }
 }
+// 每路检测/解码帧率：用相邻两次状态推送的累计计数差分得出（WS 约 0.5s 一推、
+// 轮询兜底 2s，dt 按实际间隔计），再做轻平滑。纯展示指标，数据源就是 camera_stats。
+let rateBaseline = { taskId: '', at: 0, counts: {} }
+const cameraRates = ref({})
+
+function updateCameraRates(value) {
+  const stats = value.cameraStats
+  const id = value.taskRunId
+  if (!stats || typeof stats !== 'object' || !id) return
+  const now = Date.now()
+  const counts = {}
+  for (const [cameraId, item] of Object.entries(stats)) {
+    counts[cameraId] = {
+      processed: Number(item.processed) || 0,
+      decoded: Number(item.sub?.decodedFrames) || 0
+    }
+  }
+  let rates = cameraRates.value
+  if (rateBaseline.taskId !== id) {
+    rates = {}                       // 换了任务，旧速率作废，等下一跳差分
+  } else {
+    const dt = (now - rateBaseline.at) / 1000
+    if (dt >= 0.2) {
+      rates = { ...rates }
+      for (const [cameraId, cur] of Object.entries(counts)) {
+        const prev = rateBaseline.counts[cameraId]
+        if (!prev) continue
+        const detect = Math.max(0, (cur.processed - prev.processed) / dt)
+        const decode = Math.max(0, (cur.decoded - prev.decoded) / dt)
+        const old = rates[cameraId]
+        rates[cameraId] = old
+          ? { detectFps: +(old.detectFps * 0.7 + detect * 0.3).toFixed(2),
+              decodeFps: +(old.decodeFps * 0.7 + decode * 0.3).toFixed(1) }
+          : { detectFps: +detect.toFixed(2), decodeFps: +decode.toFixed(1) }
+      }
+    }
+    // 间隔过近的重复推送不计率，只刷新基线
+  }
+  rateBaseline = { taskId: id, at: now, counts }
+  cameraRates.value = rates
+}
+
 function applyStatus(value) {
+  updateCameraRates(value)
   task.value = { ...task.value, ...value }
   remember()
 }
@@ -442,9 +488,15 @@ onBeforeUnmount(() => {
           <template #default="{ row }"><el-tag size="small" :type="cameraStateMeta(row.state).type">{{ cameraStateMeta(row.state).label }}</el-tag></template>
         </el-table-column>
         <el-table-column prop="processed" label="已检测" width="80" />
+        <el-table-column label="检测 fps" width="85">
+          <template #default="{ row }">{{ row.detectFps.toFixed(1) }}</template>
+        </el-table-column>
         <el-table-column prop="dropped" label="丢帧(覆盖)" width="100" />
         <el-table-column prop="stale" label="过期帧" width="80" />
         <el-table-column prop="decodeErrors" label="解码错误" width="90" />
+        <el-table-column label="解码 fps" width="85">
+          <template #default="{ row }">{{ row.decodeFps.toFixed(1) }}</template>
+        </el-table-column>
         <el-table-column prop="packets" label="主码流收包" width="100" />
         <el-table-column prop="sessions" label="重连" width="70" />
         <el-table-column prop="note" label="说明" min-width="180" show-overflow-tooltip />
