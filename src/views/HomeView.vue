@@ -6,14 +6,14 @@ import { useRouter } from 'vue-router'
 import { Bell, Monitor, Refresh, Timer } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncSection from '@/components/AsyncSection.vue'
-import MetricCard from '@/components/MetricCard.vue'
+import InfoGroupCard from '@/components/InfoGroupCard.vue'
 import { DASHBOARD_MODULES, loadDashboard } from '@/api/dashboard'
 import { alertLevelMeta } from '@/api/alerts'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
 import { useBreakpoint } from '@/composables/useBreakpoint'
 import { moduleIcon } from '@/composables/useModuleMeta'
-import { displayNumber, formatTime, percentStatus } from '@/utils/format'
+import { displayNumber, fixedNumber, formatTime } from '@/utils/format'
 
 const router = useRouter()
 const { refresh: refreshWithFeedback } = useRefreshFeedback()
@@ -62,7 +62,88 @@ const robotHint = computed(() => {
   return parts.filter(Boolean).join(' · ') || '等待后端上报'
 })
 
-const taskProgressText = computed(() => `${tasks.value.enabled} / ${tasks.value.total} 个任务已启用`)
+// —— 顶部三张分组卡的数据 ——
+// 原则：只展示后端真实上报的字段；读不到的（后端未实现或设备未上报）一律显示横杠，
+// 不拿 0 顶替，否则"没有数据"会被误读成"读数是 0"。
+const DASH = '—'
+
+function hasReading(value) {
+  return value !== null && value !== undefined && value !== ''
+}
+
+/** 单条读数行：定点小数 + 单位 + 缺失兜底（缺失时不带单位，避免出现 "— %"）。 */
+function readingRow(label, value, { digits = 0, unit = '' } = {}) {
+  const text = fixedNumber(value, digits)
+  return { label, value: text, unit: text === DASH ? '' : unit, mono: true }
+}
+
+// 运行状态来自 robot-core 的 health.state（idle / running / charging / emergency / degraded…）。
+const robotStatus = computed(() => {
+  const raw = telemetry.value.status
+  if (!hasReading(raw)) return { text: DASH, tone: 'muted' }
+  const text = String(raw)
+  if (/error|fail|emergency|stopped/i.test(text)) return { text, tone: 'danger' }
+  if (/running|charging/i.test(text)) return { text, tone: 'active' }
+  return { text, tone: 'idle' }
+})
+
+// 电量：后端给的是 0–100 的一位小数，展示取整；非数值视为未上报。
+const batteryReading = computed(() => {
+  const raw = telemetry.value.battery
+  if (!hasReading(raw)) return null
+  const value = Number(raw)
+  if (!Number.isFinite(value)) return null
+  return Math.round(Math.min(100, Math.max(0, value)))
+})
+
+const robotRows = computed(() => [
+  { label: 'robot_id', value: platform.value.robotId || DASH, mono: true },
+  { label: '名称', value: platform.value.name || telemetry.value.name || DASH },
+  {
+    label: '电量',
+    value: batteryReading.value === null ? DASH : String(batteryReading.value),
+    unit: batteryReading.value === null ? '' : '%',
+    tone: 'primary'
+  }
+])
+
+// 电量条只在有读数时出现；颜色按 60/25 两档阈值语义化，正常区间保持主色。
+const batteryProgress = computed(() => {
+  if (batteryReading.value === null) return null
+  const tone = batteryReading.value >= 60 ? '' : batteryReading.value >= 25 ? 'warning' : 'danger'
+  return { value: batteryReading.value, tone }
+})
+
+// 任务/告警计数直接读聚合快照；快照还没到（如接口失败）时给横杠而不是 0。
+const statusRows = computed(() => {
+  const taskStats = data.value?.tasks
+  const alertStats = data.value?.alerts
+  return [
+    {
+      label: '启用任务',
+      value: taskStats ? String(taskStats.enabled) : DASH,
+      unit: taskStats ? '个' : '',
+      hint: taskStats ? `· 共 ${taskStats.total}` : ''
+    },
+    {
+      label: '待处理告警',
+      value: alertStats ? String(alertStats.open) : DASH,
+      unit: alertStats ? '条' : '',
+      hint: alertStats ? `· 累计 ${alertStats.total}` : '',
+      tone: alertStats && alertStats.open > 0 ? 'danger' : ''
+    },
+    readingRow('CPU', telemetry.value.cpu, { digits: 0, unit: '%' }),
+    readingRow('磁盘', telemetry.value.disk, { digits: 0, unit: '%' })
+  ]
+})
+
+// 环境四路读数来自 devices.environment.values（温湿度 / 光照 / 风速），与移动底盘页同源。
+const environmentRows = computed(() => [
+  readingRow('温度', telemetry.value.temperature, { digits: 1, unit: '℃' }),
+  readingRow('湿度', telemetry.value.humidity, { digits: 1, unit: '%' }),
+  readingRow('光照', telemetry.value.light, { digits: 0, unit: 'lx' }),
+  readingRow('风速', telemetry.value.wind, { digits: 1, unit: 'm/s' })
+])
 
 // 只有任务存在时才谈"运行中/已暂停"，否则显示占位符而不是误导性的状态。
 const taskStateText = computed(() => {
@@ -170,9 +251,9 @@ function openModule(path) {
       <!-- 骨架按真实布局画：指标卡网格 + 两块面板，加载完高度不跳变 -->
       <template #skeleton>
         <div class="home-skeleton" aria-hidden="true">
-          <div class="home-skeleton__grid">
-            <div v-for="index in 6" :key="index" class="home-skeleton__card">
-              <el-skeleton :rows="2" animated />
+          <div class="overview-grid">
+            <div v-for="index in 3" :key="index" class="home-skeleton__card">
+              <el-skeleton :rows="3" animated />
             </div>
           </div>
           <div class="home-skeleton__panel">
@@ -190,46 +271,20 @@ function openModule(path) {
         :title="`部分后端接口读取失败：${data.errors.join('；')}`"
       />
 
-      <div class="metric-grid">
-        <MetricCard
-          label="剩余电量"
-          :value="displayNumber(telemetry.battery, { fallback: '—' })"
-          unit="%"
-          :hint="`状态 ${telemetry.status || '未知'}`"
-          :type="percentStatus(telemetry.battery)"
-        />
-        <MetricCard
-          label="舍内温度"
-          :value="displayNumber(telemetry.temperature)"
-          unit="℃"
-          :hint="`湿度 ${displayNumber(telemetry.humidity, { unit: '%' })}`"
-        />
-        <MetricCard
-          label="启用任务"
-          :value="tasks.enabled"
-          unit="个"
-          :hint="taskProgressText"
-          type="primary"
-        />
-        <MetricCard
-          label="待处理告警"
-          :value="alerts.open"
-          unit="条"
-          :hint="`累计 ${alerts.total} 条告警`"
-          :type="alerts.open > 0 ? 'danger' : 'success'"
-        />
-        <MetricCard
-          label="运行状态"
-          :value="telemetry.status || '未知'"
-          :hint="`站点 ${telemetry.station ?? '—'}`"
-          type="info"
-        />
-        <MetricCard
-          label="升降高度"
-          :value="displayNumber(telemetry.lift)"
-          unit="mm"
-          hint="检测台当前高度"
-        />
+      <!-- 三张分组卡：设备身份 / 运行指标 / 环境读数，各自内部再细分行 -->
+      <div class="overview-grid">
+        <InfoGroupCard title="机器人" kind="robot" :rows="robotRows" :progress="batteryProgress">
+          <template #meta>
+            <span class="overview-status" :class="`is-${robotStatus.tone}`">
+              <i class="overview-status__dot" />
+              {{ robotStatus.text }}
+            </span>
+          </template>
+        </InfoGroupCard>
+
+        <InfoGroupCard title="状态" kind="status" :rows="statusRows" />
+
+        <InfoGroupCard title="环境" kind="env" :rows="environmentRows" />
       </div>
 
       <section class="view-panel home-modules">
@@ -320,6 +375,54 @@ function openModule(path) {
   gap: 4px;
 }
 
+/* 分组卡：三列等宽；宽度不足时退到两列 / 单列，避免每行被压成一条竖线 */
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--app-gap-inner);
+}
+
+/* 运行状态胶囊：状态值来自 robot-core，颜色只做语义提示，不改变文本 */
+.overview-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  background: var(--app-surface-3);
+  color: var(--app-text-secondary);
+}
+
+.overview-status__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.overview-status.is-idle {
+  background: #2f9e5f1f;
+  color: var(--app-success);
+}
+
+.overview-status.is-active {
+  background: #1d6fd81f;
+  color: var(--app-primary);
+}
+
+.overview-status.is-danger {
+  background: #d645451f;
+  color: var(--app-danger);
+}
+
+.overview-status.is-muted {
+  background: var(--app-surface-3);
+  color: var(--app-text-muted);
+}
+
 .module-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
@@ -381,18 +484,12 @@ function openModule(path) {
   white-space: nowrap;
 }
 
-/* 骨架：与真实布局同构（6 张指标卡 + 一块面板），避免加载完成时高度突变 */
-.home-skeleton__grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-  gap: var(--app-gap-inner);
-}
-
+/* 骨架：与真实布局同构（3 张分组卡 + 一块面板），避免加载完成时高度突变 */
 .home-skeleton__card {
   padding: 14px 16px;
   background: var(--app-surface);
   border: 1px solid var(--app-border);
-  border-radius: var(--app-radius);
+  border-radius: var(--app-radius-lg);
 }
 
 .home-skeleton__panel {
@@ -401,6 +498,18 @@ function openModule(path) {
   background: var(--app-surface);
   border: 1px solid var(--app-border);
   border-radius: var(--app-radius);
+}
+
+@media (max-width: 1100px) {
+  .overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .overview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 900px) {

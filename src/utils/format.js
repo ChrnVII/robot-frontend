@@ -26,6 +26,17 @@ export function displayNumber(value, { unit = '', fallback = '—', allowNegativ
   return `${number}${unit}`
 }
 
+/**
+ * 定点小数展示：读不到就给占位符，绝不拿 0 冒充真实读数。
+ * 用于坐标/温湿度这类需要固定小数位的遥测量。
+ */
+export function fixedNumber(value, digits = 0, { fallback = '—' } = {}) {
+  if (value === null || value === undefined || value === '') return fallback
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return number.toFixed(digits)
+}
+
 /** 百分比数值转 Element Plus 进度条颜色。 */
 export function percentStatus(value) {
   const number = Number(value)
