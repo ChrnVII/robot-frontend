@@ -234,11 +234,6 @@ async function downloadArtifact(row) {
   }
 }
 
-/** 判断这次运行是不是模拟采集：manifest 里的 captureMode 是执行器写的权威标记。 */
-function isSimulated(value) {
-  return value?.manifest?.captureMode === 'simulated'
-}
-
 function runStateText(state) {
   return {
     queued: '排队中', executing: '执行中', completed: '已完成',
@@ -728,15 +723,6 @@ async function refresh() {
           :closable="false"
           show-icon
         />
-
-        <el-alert
-          class="run-note"
-          type="warning"
-          :closable="false"
-          show-icon
-          title="当前为模拟采集，按 60 倍速运行"
-          description="音频是静音波形、视频是纯色占位画面，产物写入机器人本地任务目录，用于验证编排与产物链路。"
-        />
       </template>
 
       <template #footer>
@@ -847,15 +833,6 @@ async function refresh() {
           </el-table>
 
           <el-divider content-position="left">产物</el-divider>
-          <el-alert
-            v-if="isSimulated(artifacts)"
-            class="simulated-alert"
-            type="warning"
-            :closable="false"
-            show-icon
-            title="本次为模拟采集"
-            description="音频是静音波形、视频是纯色占位画面，只用于验证任务编排与产物链路。听到没有声音、看到纯色画面、以及出现录音电平过低告警，都属于预期现象，不是设备故障。"
-          />
           <template v-if="artifacts && artifacts.exists">
             <p class="artifact-path mono">{{ artifacts.directory }}</p>
             <el-table :data="artifacts.files" size="small" border>
@@ -931,14 +908,6 @@ async function refresh() {
 .audio-player {
   width: 220px;
   height: 32px;
-}
-
-.simulated-alert {
-  margin-bottom: 10px;
-}
-
-.run-note {
-  margin-top: 10px;
 }
 
 .run-progress {
