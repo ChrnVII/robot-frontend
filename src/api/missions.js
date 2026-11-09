@@ -9,7 +9,7 @@
 // 与 api/tasks.js 的区别：tasks 走 ui_tasks（旧工作台影子表，payload JSON），
 // missions 走 missions 表（强类型 + 采集配置 JSON），两者互不写入。
 import request from '@/utils/request'
-import { unwrapPage } from './envelope'
+import { unwrap, unwrapPage } from './envelope'
 
 /** 任务状态。 */
 export const MISSION_STATES = [
