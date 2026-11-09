@@ -26,10 +26,10 @@ const routes = [
     component: () => import('../views/LiftView.vue')
   },
   {
-    path: '/tasks', // 任务管理
+    path: '/tasks', // 任务管理（采集会话版，走 /api/v1/missions）
     name: 'tasks',
     meta: { title: '任务管理' },
-    component: () => import('../views/TasksView.vue')
+    component: () => import('../views/MissionsView.vue')
   },
   {
     path: '/map', // 地图站点
