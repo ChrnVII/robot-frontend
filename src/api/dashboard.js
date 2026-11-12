@@ -17,7 +17,8 @@ export const DASHBOARD_MODULES = [
   { key: 'params', path: '/params', label: '参数设置', description: '通信与服务配置' },
   { key: 'runs', path: '/runs', label: '运行数据', description: '任务执行记录' },
   { key: 'alerts', path: '/alerts', label: '告警数据', description: '异常事件处置' },
-  { key: 'task-tmpl', path: '/task-tmpl', label: '默认任务', description: '路线模板维护' }
+  { key: 'task-tmpl', path: '/task-tmpl', label: '默认任务', description: '路线模板维护' },
+  { key: 'cloud', path: '/cloud-link', label: '云端接入', description: '连接、注册与凭据' }
 ]
 
 export async function loadDashboard() {

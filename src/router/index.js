@@ -80,6 +80,12 @@ const routes = [
     component: () => import('../views/DetectionsView.vue')
   },
   {
+    path: '/cloud-link', // 云端接入（cloud-agent 的状态与全部人工操作）
+    name: 'cloud-link',
+    meta: { title: '云端接入' },
+    component: () => import('../views/CloudLinkView.vue')
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
     meta: { title: '页面不存在' },

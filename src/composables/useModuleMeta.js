@@ -3,7 +3,7 @@
 // 且「运行总览」和「智能检测」都用了 Odometer、「任务管理」和「默认任务」都用 Document，
 // 侧栏出现两个一模一样的图标。这里统一收敛并给每个入口配唯一图标。
 import {
-  Bell, Cpu, DataLine, Document, Files, Guide, MapLocation, Monitor,
+  Bell, Connection, Cpu, DataLine, Document, Files, Guide, MapLocation, Monitor,
   Operation, Setting, Van, VideoCamera
 } from '@element-plus/icons-vue'
 
@@ -27,6 +27,7 @@ export const MODULE_META = {
   'task-tmpl': { icon: Files, group: 'config' },
   map: { icon: MapLocation, group: 'config' },
   params: { icon: Setting, group: 'config' },
+  cloud: { icon: Connection, group: 'config' },
   runs: { icon: DataLine, group: 'data' },
   alerts: { icon: Bell, group: 'data' }
 }
