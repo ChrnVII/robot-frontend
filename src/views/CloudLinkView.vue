@@ -436,7 +436,7 @@ onBeforeUnmount(() => {
           </el-col>
           <el-col :xs="24" :md="12">
             <el-form-item label="摄像头编号">
-              <el-input v-model="configForm.cameraId" placeholder="ptz" clearable />
+              <el-input v-model="configForm.cameraId" placeholder="留空使用默认球形摄像头" clearable />
             </el-form-item>
           </el-col>
           <el-col :xs="24" :md="12">
