@@ -430,6 +430,26 @@ onBeforeUnmount(() => {
             </el-form-item>
           </el-col>
           <el-col :xs="24" :md="12">
+            <el-form-item label="本地平台地址">
+              <el-input v-model="configForm.backendBase" placeholder="http://127.0.0.1:8100" clearable />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <el-form-item label="摄像头编号">
+              <el-input v-model="configForm.cameraId" placeholder="ptz" clearable />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <el-form-item label="允许远程画面">
+              <el-switch v-model="configForm.mediaEnabled" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="12">
+            <el-form-item label="媒体上游上限">
+              <el-input-number v-model="configForm.mediaMaxSessions" :min="1" :max="8" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :md="12">
             <el-form-item label="配置文件">
               <span class="mono muted">{{ config.configPath || '—' }}</span>
             </el-form-item>
