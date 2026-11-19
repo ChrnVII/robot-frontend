@@ -348,21 +348,6 @@ async function openDir() {
   }
 }
 
-function download(file) {
-  const base = outputDir.value.replace(/\/$/, '')
-  if (!base) return
-  fetchManagedFileBlob(`${base}/${file.path}`)
-    .then((blob) => {
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = String(file.path).split('/').pop() || 'download'
-      link.click()
-      URL.revokeObjectURL(url)
-    })
-    .catch((error) => ElMessage.error(getErrorMessage(error, '下载失败')))
-}
-
 function openPreview(file) {
   const base = outputDir.value.replace(/\/$/, '')
   if (!base) return
@@ -584,9 +569,9 @@ onBeforeUnmount(() => {
 
           <div class="view-panel__head files-head">
             <h2>产物文件</h2>
-            <small>每路一个 MKV；预览由后端转封装成 MP4 后播放</small>
+            <small>每路一个 MKV + 一段 WAV；视频预览由后端转封装成 MP4 后播放</small>
           </div>
-          <FileList :files="files" empty-text="采集开始后这里会列出每路的录像文件" @preview="openPreview" @download="download" />
+          <FileList :files="files" empty-text="采集开始后这里会列出每路的录像文件" @preview="openPreview" />
         </section>
       </div>
     </AsyncSection>
