@@ -185,6 +185,27 @@ const files = computed(() => {
 
 const outputDir = computed(() => String(task.value?.outputDir || audio.value?.directory || ''))
 
+// 音频状态必须按 audioState 显示：之前只要 audio 对象存在就写"在录"，
+// 于是点了结束、录音已经 completed，界面还挂着"在录"。
+const audioText = computed(() => {
+  if (!wantAudio.value) return '关'
+  if (!audio.value) return '—'
+  return ({
+    starting: '启动中',
+    recording: '在录',
+    stopping: '收尾中',
+    completed: '已收尾',
+    failed: '失败'
+  }[audioState.value] || audioState.value)
+})
+
+// 面板标题跟着状态走：结束之后不该还写「采集中」
+const panelTitle = computed(() => {
+  if (running.value) return '采集中'
+  if (task.value?.taskRunId || audio.value) return '采集结果'
+  return '待开始'
+})
+
 function startTicking() {
   stopTicking()
   tickTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
@@ -311,11 +332,15 @@ async function stop() {
   busy.value = 'stop'
   try {
     // 先停音频：WAV 要写正确的头，收尾比视频快；失败也要继续停视频。
-    if (audio.value && audioRunning.value) {
+    // 只要本地还持有 audio 状态就尝试停一次——前端状态可能因为轮询间隔而滞后，
+    // 漏停会让麦克风一直录下去（服务端有音频时返回 404 AUDIO_IDLE，忽略即可）。
+    if (audio.value) {
       try {
         audio.value = unwrap(await stopAudioRecording(), {}) || audio.value
       } catch (error) {
-        ElMessage.warning(getErrorMessage(error, '停止录音失败，请检查文件是否完整'))
+        if (audioRunning.value) {
+          ElMessage.warning(getErrorMessage(error, '停止录音失败，请检查文件是否完整'))
+        }
       }
     }
     if (task.value?.taskRunId) {
@@ -502,7 +527,7 @@ onBeforeUnmount(() => {
 
         <section class="view-panel">
           <div class="view-panel__head">
-            <h2>采集中</h2>
+            <h2>{{ panelTitle }}</h2>
             <small>
               {{ isMine ? `视频任务 ${task.taskRunId}` : '' }}
               <span v-if="isMine && audio">·</span>
@@ -526,7 +551,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="stat">
               <span class="stat__label">音频</span>
-              <strong class="stat__value">{{ wantAudio ? (audioState === 'failed' ? '失败' : audio ? '在录' : '—') : '关' }}</strong>
+              <strong class="stat__value">{{ audioText }}</strong>
             </div>
           </div>
 
