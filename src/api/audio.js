@@ -5,12 +5,18 @@
 // 录音文件固定写 `<任务目录>/audio/session.wav`，与视频同处一个目录。
 import request from '@/utils/request'
 
-/** 开始录音。directory 省略时由后端在 data/cams 下新建一个采集目录（仅声音时用）。 */
-export function startAudioRecording(directory) {
+/**
+ * 开始录音。directory 省略时由后端在 data/cams 下新建一个采集目录（仅声音时用）。
+ * durationSeconds > 0 时后端到点自动停止，与视频任务同一个时长。
+ */
+export function startAudioRecording(directory, durationSeconds = 0) {
+  const data = {}
+  if (directory) data.directory = directory
+  if (durationSeconds > 0) data.durationSeconds = durationSeconds
   return request({
     url: '/api/v1/audio/recordings',
     method: 'post',
-    data: directory ? { directory } : {}
+    data
   })
 }
 

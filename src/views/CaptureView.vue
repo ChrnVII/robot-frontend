@@ -271,7 +271,7 @@ async function start() {
     // 2) 音频：声音+视频时写进任务目录；只录声音时让后端自己建目录
     if (wantAudio.value) {
       const directory = wantVideo.value ? (task.value?.outputDir || '') : ''
-      audio.value = unwrap(await startAudioRecording(directory || undefined), {}) || {}
+      audio.value = unwrap(await startAudioRecording(directory || undefined, durationSeconds.value), {}) || {}
       if (audio.value.state === 'failed') throw new Error(audio.value.error || '麦克风不可用')
     } else {
       audio.value = null
@@ -472,19 +472,19 @@ onBeforeUnmount(() => {
               <span class="field-hint">{{ pipeline === 'inference' ? '边录边推理（占 CPU）' : '只录制不推理（推荐采集时使用）' }}</span>
             </el-form-item>
 
-            <el-form-item v-if="wantVideo" label="采集时长">
+            <el-form-item label="采集时长">
               <el-radio-group v-model="durationMode">
                 <el-radio value="preset">预设</el-radio>
                 <el-radio value="custom">自定义</el-radio>
                 <el-radio value="manual">不限（手动结束）</el-radio>
               </el-radio-group>
             </el-form-item>
-            <el-form-item v-if="wantVideo && durationMode === 'preset'" label="选择">
+            <el-form-item v-if="durationMode === 'preset'" label="选择">
               <el-radio-group v-model="presetMinutes">
                 <el-radio-button v-for="item in DURATION_PRESETS" :key="item" :value="item">{{ item }} 分钟</el-radio-button>
               </el-radio-group>
             </el-form-item>
-            <el-form-item v-if="wantVideo && durationMode === 'custom'" label="分钟数">
+            <el-form-item v-if="durationMode === 'custom'" label="分钟数">
               <el-input-number v-model="customMinutes" :min="1" :max="120" />
               <span class="field-hint">到点后后端自动收尾</span>
             </el-form-item>
