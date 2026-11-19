@@ -124,6 +124,21 @@ export async function fetchPreviewBlob(absolutePath) {
   return response.data
 }
 
+/**
+ * 按绝对路径下载受管目录内的任意产物（视频 / 音频 / 记录）。
+ * 音频（WAV）与 JSON 不经过转封装，原样返回；前端取 blob 后播放或下载。
+ */
+export async function fetchManagedFileBlob(absolutePath) {
+  const response = await request({
+    url: '/api/v1/media/file',
+    method: 'get',
+    params: { path: absolutePath },
+    responseType: 'blob',
+    timeout: 180000
+  })
+  return response.data
+}
+
 function acquireControlLease(data) {
   return request({
     url: '/api/v1/control/leases',
