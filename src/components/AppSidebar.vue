@@ -8,7 +8,7 @@ import { computed, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
-  ArrowLeft, ArrowRight, Bell, MuteNotification, Sunny, Moon
+  ArrowLeft, ArrowRight, Bell, CircleCloseFilled, MuteNotification, Sunny, Moon
 } from '@element-plus/icons-vue'
 import { DASHBOARD_MODULES } from '@/api/dashboard'
 import { NAV_GROUPS, moduleGroup, moduleIcon } from '@/composables/useModuleMeta'
@@ -16,13 +16,21 @@ import { useTheme } from '@/composables/useTheme'
 import { useAlertNotifier } from '@/composables/useAlertNotifier'
 
 const props = defineProps({
-  status: { type: String, default: 'checking' }, // checking | online | offline
+  status: { type: String, default: 'checking' }, // checking | ok | degraded | offline
   statusText: { type: String, default: '正在检测后端' },
   statusHint: { type: String, default: '' },
   robotId: { type: String, default: '' },
   openAlerts: { type: Number, default: 0 },
-  checkedAt: { type: String, default: '' }
+  checkedAt: { type: String, default: '' },
+  // 急停：锁存态来自 robot-core 的 state，全局常驻而不是只在升降页
+  emergency: { type: Boolean, default: false },
+  estopBusy: { type: Boolean, default: false },
+  // 当前正在跑的检测/采集任务（null 表示空闲）。巡检域只有一个槽位，
+  // 侧栏常驻显示它，用户在任何页面都知道"现在有东西在跑"。
+  activeTask: { type: Object, default: null }
 })
+
+const emit = defineEmits(['estop', 'estop-reset'])
 
 const route = useRoute()
 const { isDark, toggle: toggleTheme } = useTheme()
@@ -83,12 +91,25 @@ const navigation = computed(() => {
 // 折叠时给每个图标配 tooltip，否则用户只能看到一排无语义的图标。
 const showTooltip = computed(() => collapsed.value)
 
-const statusLabel = computed(() => {
-  if (props.status === 'checking') return '检测中'
-  return props.status === 'online' ? '在线' : '离线'
-})
+const statusLabel = computed(() => ({
+  checking: '检测中',
+  ok: '在线',
+  degraded: '降级',
+  offline: '离线'
+}[props.status] || '离线'))
+
+// 三态映射到样式类：ok 沿用旧的 online 绿色，degraded 单独一档琥珀色。
+const statusTone = computed(() => (props.status === 'ok' ? 'online' : props.status))
 
 const alertCountText = computed(() => (props.openAlerts > 99 ? '99+' : String(props.openAlerts)))
+
+// 侧栏的"正在跑什么"：巡检域只有一个任务槽位，这一行让用户在任何页面都心里有数
+const activeHint = computed(() => {
+  const task = props.activeTask
+  if (!task) return ''
+  const label = { starting: '正在启动', running: '正在采集', stopping: '正在收尾' }[String(task.state)] || '任务运行中'
+  return `${label} · ${task.taskName || task.taskRunId || ''}`
+})
 
 function isActive(path) {
   return route.path === path
@@ -182,9 +203,32 @@ const alertActionLabel = computed(() => {
     </el-scrollbar>
 
     <div class="sidebar-footer">
+      <!-- 正在采集/检测：常驻一行，点进手动采集页看进度。 -->
+      <RouterLink v-if="activeTask" to="/capture" class="running-line" :title="activeHint">
+        <span class="running-dot" aria-hidden="true" />
+        <span class="running-text">{{ activeHint }}</span>
+      </RouterLink>
+
+      <!-- 全局急停：任何页面都能一键停下底盘与升降。
+           以前只有「升降控制」页有急停入口，操作员在检测页发现问题还得先跳页。 -->
+      <div class="estop">
+        <button
+          type="button"
+          class="estop-btn"
+          :class="{ 'estop-btn--latched': emergency }"
+          :disabled="estopBusy"
+          :title="emergency ? '急停锁存中，点击解除' : '立即急停'"
+          :aria-label="emergency ? '急停复位' : '急停'"
+          @click="emit(emergency ? 'estop-reset' : 'estop')"
+        >
+          <el-icon class="estop-icon"><CircleCloseFilled /></el-icon>
+          <span class="estop-label">{{ emergency ? '急停复位' : '急停' }}</span>
+        </button>
+      </div>
+
       <div
         class="status-line"
-        :class="`status-line--${status}`"
+        :class="`status-line--${statusTone}`"
         :title="statusHint"
         role="status"
         aria-live="polite"
@@ -484,6 +528,104 @@ const alertActionLabel = computed(() => {
   border-top: 1px solid var(--app-border);
 }
 
+/* 急停按钮：常驻、最高视觉权重，锁存后变成"复位" */
+.estop {
+  margin-bottom: 8px;
+}
+
+/* 正在采集提示：绿色呼吸点 + 一行文字，点击进采集页 */
+.running-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgb(47 158 95 / 10%);
+  color: var(--app-success);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.running-line:hover {
+  background: rgb(47 158 95 / 16%);
+}
+
+.running-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.running-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-sidebar.is-collapsed .running-text {
+  display: none;
+}
+
+.app-sidebar.is-collapsed .running-line {
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.estop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  /* 触屏可点：不低于 40px 高 */
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid rgb(214 69 69 / 55%);
+  border-radius: 9px;
+  background: rgb(214 69 69 / 10%);
+  color: var(--app-danger);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.estop-btn:hover:not(:disabled) {
+  background: var(--app-danger);
+  border-color: var(--app-danger);
+  color: #fff;
+}
+
+.estop-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 锁存态：实心红，配合横幅提示"已急停，需复位" */
+.estop-btn--latched {
+  background: var(--app-danger);
+  border-color: var(--app-danger);
+  color: #fff;
+}
+
+.estop-icon {
+  font-size: 15px;
+}
+
+/* 折叠态只留图标，高度不变 */
+.app-sidebar.is-collapsed .estop-label {
+  display: none;
+}
+
+.app-sidebar.is-collapsed .estop-btn {
+  padding: 8px 0;
+}
+
 .status-line {
   display: flex;
   align-items: center;
@@ -516,6 +658,12 @@ const alertActionLabel = computed(() => {
 .status-line--offline .status-dot {
   background: var(--app-danger);
   box-shadow: 0 0 0 3px rgb(214 69 69 / 18%);
+}
+
+/* 降级：后端在、robot-core 不在。不能给绿灯，也不能等同完全离线 */
+.status-line--degraded .status-dot {
+  background: var(--app-warning);
+  box-shadow: 0 0 0 3px rgb(214 145 47 / 20%);
 }
 
 /* 检测中：呼吸动画，明确表达"还没得出结论"而不是"在线" */
@@ -577,6 +725,15 @@ const alertActionLabel = computed(() => {
 .status-line--offline .status-badge {
   background: rgb(214 69 69 / 12%);
   color: var(--app-danger);
+}
+
+.status-line--degraded .status-badge {
+  background: rgb(214 145 47 / 14%);
+  color: #a96a12;
+}
+
+:global(html.dark) .status-line--degraded .status-badge {
+  color: #f0c179;
 }
 
 .footer-actions {

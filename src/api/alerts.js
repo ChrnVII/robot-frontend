@@ -19,6 +19,18 @@ export const ALERT_STATUSES = [
   { value: 'closed', label: '已关闭', tag: 'info' }
 ]
 
+/**
+ * 「处理告警」弹窗的可选项。
+ *
+ * 后端 handle_alert 只接受 open / handled / closed（services/alerts.py 的
+ * _STATUS_TO_STATE），提交 acknowledged 会直接 400「处理状态非法」。
+ * acknowledged 只作为库内状态存在（列表里会被映射成 handled 显示），
+ * 所以它只能出现在筛选条件里，不能作为处理动作提交。
+ */
+export const ALERT_HANDLE_STATUSES = ALERT_STATUSES.filter(
+  (item) => item.value === 'handled' || item.value === 'closed'
+)
+
 export function alertLevelMeta(level) {
   return ALERT_LEVELS.find((item) => item.value === level) || { value: level, label: String(level ?? '—'), tag: 'info' }
 }

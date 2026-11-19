@@ -11,16 +11,11 @@ import { DASHBOARD_MODULES, loadDashboard } from '@/api/dashboard'
 import { alertLevelMeta } from '@/api/alerts'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
-import { useBreakpoint } from '@/composables/useBreakpoint'
 import { moduleIcon } from '@/composables/useModuleMeta'
-import { displayNumber, fixedNumber, formatTime } from '@/utils/format'
+import { fixedNumber, formatTime } from '@/utils/format'
 
 const router = useRouter()
 const { refresh: refreshWithFeedback } = useRefreshFeedback()
-
-// 设备状态表在窄屏从 4 列降到 2 列，否则每格只有几十像素宽。
-const isNarrow = useBreakpoint()
-const descColumns = computed(() => (isNarrow.value ? 2 : 4))
 
 //: 总览页是看板：默认 8s 自动刷新。页面不可见时暂停，避免后台标签页空转。
 const AUTO_REFRESH_MS = 8000
@@ -49,9 +44,10 @@ const showSkeleton = computed(() => loading.value && !data.value && !error.value
 
 const platformStatus = computed(() => {
   if (!data.value) return { text: '读取中', type: 'info' }
-  return online.value
-    ? { text: '系统在线', type: 'success' }
-    : { text: '系统离线', type: 'danger' }
+  if (online.value) return { text: '系统在线', type: 'success' }
+  // 后端在但核心不在：设备读数为空是"降级"，不是"离线"，两者处置方式不同。
+  if (data.value.health?.degraded) return { text: '机器人核心离线', type: 'warning' }
+  return { text: '系统离线', type: 'danger' }
 })
 
 const robotHint = computed(() => {
@@ -114,10 +110,43 @@ const batteryProgress = computed(() => {
   return { value: batteryReading.value, tone }
 })
 
+/** robot-core 上报的设备清单：deviceId / health / source / sampledAt / quality。 */
+const deviceRows = computed(() => {
+  const devices = data.value?.devices || {}
+  return Object.entries(devices)
+    .map(([key, item]) => ({
+      key,
+      deviceId: item?.deviceId || key,
+      health: String(item?.health || 'unknown'),
+      source: String(item?.source || ''),
+      sampledAt: item?.sampledAt || '',
+      quality: String(item?.quality || '')
+    }))
+    // 异常排前面：出问题时第一眼要看到是谁出问题，而不是按字母序翻。
+    .sort((a, b) => Number(a.health === 'ok') - Number(b.health === 'ok') || a.deviceId.localeCompare(b.deviceId))
+})
+
+/** 数据源为 simulator 的设备：这些通道的读数/回执不代表真实设备动作。 */
+const simulatedCount = computed(() => deviceRows.value.filter((item) => item.source === 'simulator').length)
+
+//: robot-core 的 DeviceState.health 取值 → 标签与颜色（ok / degraded / unavailable / fault）。
+const HEALTH_META = {
+  ok: { label: '正常', tag: 'success' },
+  degraded: { label: '降级', tag: 'warning' },
+  unavailable: { label: '未就绪', tag: 'info' },
+  fault: { label: '故障', tag: 'danger' }
+}
+
+function healthMeta(value) {
+  return HEALTH_META[value] || { label: value || '未知', tag: 'info' }
+}
+
 // 任务/告警计数直接读聚合快照；快照还没到（如接口失败）时给横杠而不是 0。
 const statusRows = computed(() => {
   const taskStats = data.value?.tasks
   const alertStats = data.value?.alerts
+  const deviceList = deviceRows.value
+  const abnormal = deviceList.filter((item) => item.health !== 'ok').length
   return [
     {
       label: '启用任务',
@@ -132,8 +161,21 @@ const statusRows = computed(() => {
       hint: alertStats ? `· 累计 ${alertStats.total}` : '',
       tone: alertStats && alertStats.open > 0 ? 'danger' : ''
     },
-    readingRow('CPU', telemetry.value.cpu, { digits: 0, unit: '%' }),
-    readingRow('磁盘', telemetry.value.disk, { digits: 0, unit: '%' })
+    {
+      // 设备异常数取代原来恒为横杠的 CPU / 磁盘：health 来自 robot-core 的实时自检。
+      label: '设备异常',
+      value: deviceList.length ? String(abnormal) : DASH,
+      unit: deviceList.length ? '台' : '',
+      hint: deviceList.length ? `· 共 ${deviceList.length} 个设备` : '',
+      tone: abnormal > 0 ? 'danger' : ''
+    },
+    {
+      label: '模拟设备',
+      value: deviceList.length ? String(simulatedCount.value) : DASH,
+      unit: deviceList.length ? '台' : '',
+      hint: simulatedCount.value ? '· 未接真机' : '· 全部真机',
+      tone: simulatedCount.value ? 'warning' : ''
+    }
   ]
 })
 
@@ -338,20 +380,43 @@ function openModule(path) {
       <section class="view-panel">
         <div class="view-panel__head">
           <h2>设备状态</h2>
-          <small>数据来自 /api/v1/robot/state</small>
+          <small>来自 robot-core 自检 · 共 {{ deviceRows.length }} 个设备</small>
         </div>
-        <el-descriptions :column="descColumns" border size="small">
-          <el-descriptions-item label="机器人">{{ platform.robotId || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="固件版本">{{ telemetry.firmware || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="SDK">{{ telemetry.sdk || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="接口版本">{{ platform.apiVersion || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="CPU">{{ displayNumber(telemetry.cpu, { unit: '%' }) }}</el-descriptions-item>
-          <el-descriptions-item label="磁盘">{{ displayNumber(telemetry.disk, { unit: '%' }) }}</el-descriptions-item>
-          <el-descriptions-item label="位置">
-            x {{ displayNumber(telemetry.x) }} / y {{ displayNumber(telemetry.y) }} / yaw {{ displayNumber(telemetry.yaw, { unit: '°' }) }}
-          </el-descriptions-item>
-          <el-descriptions-item label="任务">{{ taskStateText }}</el-descriptions-item>
-        </el-descriptions>
+        <!-- 这张表只用后端真实上报的字段。
+             此前这里是 固件版本 / SDK / 位置 x,y,yaw / CPU / 磁盘 —— robot-core 的
+             health 里根本没有这些字段，于是六格永远是横杠，看着像"功能全坏"。 -->
+        <el-table :data="deviceRows" size="small" border>
+          <template #empty>
+            <el-empty description="robot-core 未上报设备状态" :image-size="60" />
+          </template>
+          <el-table-column prop="deviceId" label="设备" width="130" />
+          <el-table-column label="健康" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" effect="light" :type="healthMeta(row.health).tag">
+                {{ healthMeta(row.health).label }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="数据源" min-width="200">
+            <template #default="{ row }">
+              <span class="mono">{{ row.source || '—' }}</span>
+              <!-- source=simulator 就是驱动层没接真机：读数与回执都不代表现场动作 -->
+              <el-tag v-if="row.source === 'simulator'" size="small" type="info" effect="plain" class="sim-tag">模拟</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="最近采样" width="180">
+            <template #default="{ row }">{{ row.sampledAt ? formatTime(row.sampledAt) : '—' }}</template>
+          </el-table-column>
+          <el-table-column label="质量" width="100">
+            <template #default="{ row }">{{ row.quality || '—' }}</template>
+          </el-table-column>
+        </el-table>
+
+        <div class="device-foot">
+          <span>机器人 {{ platform.robotId || '—' }}</span>
+          <span>接口 {{ platform.apiVersion || '—' }}</span>
+          <span>当前任务 {{ taskStateText }}</span>
+        </div>
       </section>
     </AsyncSection>
   </div>
@@ -484,8 +549,26 @@ function openModule(path) {
   white-space: nowrap;
 }
 
-/* 骨架：与真实布局同构（3 张分组卡 + 一块面板），避免加载完成时高度突变 */
-.home-skeleton__card {
+/* 设备表：数据源用等宽字体，一眼能看出是串口 ttyS0@9600 还是 simulator */
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.sim-tag {
+  margin-left: 6px;
+}
+
+.device-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 10px;
+  color: var(--app-text-muted);
+  font-size: 12px;
+}
+
+/* 骨架：与真实布局同构（3 张分组卡 + 一块面板），避免加载完成时高度突变 */.home-skeleton__card {
   padding: 14px 16px;
   background: var(--app-surface);
   border: 1px solid var(--app-border);

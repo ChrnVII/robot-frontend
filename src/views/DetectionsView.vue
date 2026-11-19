@@ -366,6 +366,9 @@ function qualityLabel(state) {
   return { valid: '正常', degraded: '电平异常', invalid: '无效' }[state] || state
 }
 async function lift(action) {
+  // 「急停」走的是急停通道（inspection.js: stopInspectionLift → POST /emergency-stop），
+  // 会同时停底盘与升降并进入锁存态，需要复位才能重新动作。
+  // 不加二次确认：急停本身就是现场处置动作，多一步确认等于延迟停机。
   liftBusy.value = action
   try { await (action === 'stop' ? stopInspectionLift() : moveInspectionLift(action)) }
   catch (error) { ElMessage.error(apiErrorMessage(error, '升降指令失败')) }
@@ -453,7 +456,7 @@ onBeforeUnmount(() => {
           <el-button :disabled="restoring" @click="openAudioPanel">录音记录</el-button>
           <el-button :icon="Top" :loading="liftBusy === 'up'" :disabled="Boolean(liftBusy)" @click="lift('up')">升起</el-button>
           <el-button :icon="Bottom" :loading="liftBusy === 'down'" :disabled="Boolean(liftBusy)" @click="lift('down')">下降</el-button>
-          <el-button type="danger" plain @click="lift('stop')">停止升降</el-button>
+          <el-button type="danger" :loading="liftBusy === 'stop'" @click="lift('stop')">急停</el-button>
         </div>
       </el-card>
       <el-card shadow="never">

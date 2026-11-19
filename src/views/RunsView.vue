@@ -1,13 +1,14 @@
 <script setup>
-// 运行数据：服务端筛选 / 分页 + 断点续跑 + 删除记录。
+// 运行数据：全局采集会话记录（mission_runs）的服务端筛选 / 分页 + 中断后重跑。
+// 与「任务管理」同一数据源：任务管理看单个任务的会话，这里看所有任务的会话。
 import { computed, onMounted, ref, watch } from 'vue'
-import { Delete, Refresh, RefreshRight, Search, VideoPlay } from '@element-plus/icons-vue'
+import { Refresh, RefreshRight, Search, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncSection from '@/components/AsyncSection.vue'
 import DataTable from '@/components/DataTable.vue'
 import {
-  canResumeRun, deleteRun, fetchRunsPage, resumeRun, runStatusLabel, runStatusTagType
+  RUN_STATES, canResumeRun, fetchRunsPage, resumeRun, runStateMeta
 } from '@/api/runs'
 import { useServerTable } from '@/composables/useServerTable'
 import { useAsyncTask } from '@/composables/useAsyncTask'
@@ -25,28 +26,30 @@ const {
   rows, total, page, pageSize, loading, error, load, search, reload, setPage, setPageSize
 } = useServerTable(fetchRunsPage, { pageSize: 10 })
 
+// 列只保留后端真实返回的字段：
+// 原来的「结束时间 / 执行描述 / 当前位置 / 站点总数」在 ui_runs 里根本不存在，
+// 前三列恒为横杠、后两列恒为 0，看着像数据坏了。
 const columns = [
   { prop: 'taskRunId', label: '执行 ID', minWidth: 180, fixed: 'left', slot: 'id' },
-  { prop: 'startTime', label: '开始时间', width: 175, formatter: (row) => formatTime(row.startTime) },
-  { prop: 'endTime', label: '结束时间', width: 175, formatter: (row) => formatTime(row.endTime) },
-  { prop: 'status', label: '执行状态', width: 110, slot: 'status' },
-  { prop: 'description', label: '执行描述', width: 150, formatter: (row) => row.description || '—' },
-  { prop: 'taskId', label: '任务 ID', width: 100 },
-  { prop: 'currentPosition', label: '当前位置', width: 110 },
-  { prop: 'stationTotal', label: '站点总数', width: 100 },
-  { prop: 'actions', label: '操作', width: 160, fixed: 'right', slot: 'actions' }
+  { prop: 'missionName', label: '任务', minWidth: 160, formatter: (row) => row.missionName || row.missionId || '—' },
+  { prop: 'startedAt', label: '开始时间', width: 175, formatter: (row) => (row.startedAt ? formatTime(row.startedAt) : '—') },
+  { prop: 'finishedAt', label: '结束时间', width: 175, formatter: (row) => (row.finishedAt ? formatTime(row.finishedAt) : '—') },
+  { prop: 'state', label: '执行状态', width: 110, slot: 'status' },
+  { prop: 'currentStep', label: '当前步骤', width: 140, formatter: (row) => row.currentStep || '—' },
+  { prop: 'failureCode', label: '失败码', width: 150, formatter: (row) => row.failureCode || '—' },
+  { prop: 'actions', label: '操作', width: 120, fixed: 'right', slot: 'actions' }
 ]
 
 const headerDescription = computed(() => {
-  const scope = keyword.value || statusFilter.value !== '' ? '筛选结果' : '全部'
-  return `${scope} ${total.value} 条执行记录 · 中断 ${interruptedTotal.value} 条`
+  const scope = keyword.value || statusFilter.value ? '筛选结果' : '全部'
+  return `${scope} ${total.value} 条运行记录 · 中断 ${interruptedTotal.value} 条`
 })
 
 let filterTimer = null
 watch([keyword, statusFilter], () => {
   if (filterTimer) window.clearTimeout(filterTimer)
   filterTimer = window.setTimeout(() => {
-    search({ keyword: keyword.value, status: statusFilter.value })
+    search({ keyword: keyword.value, state: statusFilter.value })
   }, 300)
 })
 
@@ -58,46 +61,24 @@ onMounted(async () => {
 /** 中断数是全局口径，分页后本地没有全量数据，单独取一次 total。 */
 async function refreshInterruptedTotal() {
   try {
-    const result = await fetchRunsPage({ status: 100, page: 1, pageSize: 1 })
+    const result = await fetchRunsPage({ state: 'interrupted', page: 1, pageSize: 1 })
     interruptedTotal.value = result.total
   } catch {
     interruptedTotal.value = 0
   }
 }
 
-function routePreview(route) {
-  const text = String(route || '')
-  if (text.length <= 60) return text
-  return `${text.slice(0, 60)}…`
-}
-
 async function resume(row) {
   try {
-    await ElMessageBox.confirm(`从当前站点继续执行 ${row.taskRunId}？机器人会恢复移动。`, '续跑确认', {
-      type: 'warning',
-      confirmButtonText: '继续执行',
-      cancelButtonText: '取消'
-    })
+    await ElMessageBox.confirm(
+      `重新开始一次采集（原会话 ${row.taskRunId}）？机器人与相机将重新进入采集状态，旧目录保留。`,
+      '重跑确认',
+      { type: 'warning', confirmButtonText: '重新开始', cancelButtonText: '取消' }
+    )
   } catch {
     return
   }
-  const result = await run(`resume-${row.taskRunId}`, () => resumeRun(row.taskRunId), { success: `执行 ${row.taskRunId} 已续跑` })
-  if (result === undefined) return
-  await reload()
-  await refreshInterruptedTotal()
-}
-
-async function remove(row) {
-  try {
-    await ElMessageBox.confirm(`删除执行记录 ${row.taskRunId}？该操作不可撤销。`, '删除确认', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
-    })
-  } catch {
-    return
-  }
-  const result = await run(`delete-${row.taskRunId}`, () => deleteRun(row.taskRunId), { success: '执行记录已删除' })
+  const result = await run(`resume-${row.taskRunId}`, () => resumeRun(row.taskRunId), { success: '已重新开始一次采集' })
   if (result === undefined) return
   await reload()
   await refreshInterruptedTotal()
@@ -129,12 +110,9 @@ function resetFilters() {
       <section class="view-panel">
         <div class="view-toolbar">
           <div class="view-toolbar__actions">
-            <el-input v-model="keyword" class="filter-search" placeholder="按执行 ID 或任务 ID 搜索" :prefix-icon="Search" clearable />
+            <el-input v-model="keyword" class="filter-search" placeholder="按执行 ID / 任务 ID / 任务名搜索" :prefix-icon="Search" clearable />
             <el-select v-model="statusFilter" class="filter-select" placeholder="执行状态" clearable>
-              <el-option label="执行中" :value="1" />
-              <el-option label="待续跑" :value="2" />
-              <el-option label="失败" :value="3" />
-              <el-option label="已中断" :value="100" />
+              <el-option v-for="item in RUN_STATES" :key="item.value" :label="item.label" :value="item.value" />
             </el-select>
             <el-button text :icon="RefreshRight" @click="resetFilters">重置</el-button>
           </div>
@@ -149,7 +127,7 @@ function resetFilters() {
           :page="page"
           :page-size="pageSize"
           :total="total"
-          empty-text="暂无执行记录"
+          empty-text="暂无运行记录，去「任务管理」启动一次采集"
           @page-change="setPage"
           @size-change="setPageSize"
         >
@@ -157,7 +135,7 @@ function resetFilters() {
             <span class="text-mono">{{ row.taskRunId }}</span>
           </template>
           <template #cell-status="{ row }">
-            <el-tag :type="runStatusTagType(row.status)" effect="light" size="small">{{ runStatusLabel(row.status) }}</el-tag>
+            <el-tag :type="runStateMeta(row.state).tag" effect="light" size="small">{{ runStateMeta(row.state).label }}</el-tag>
           </template>
           <template #cell-actions="{ row }">
             <el-button
@@ -169,29 +147,10 @@ function resetFilters() {
               :loading="pendingKey === `resume-${row.taskRunId}`"
               @click="resume(row)"
             >
-              续跑
-            </el-button>
-            <el-button
-              text
-              type="danger"
-              size="small"
-              :icon="Delete"
-              :loading="pendingKey === `delete-${row.taskRunId}`"
-              @click="remove(row)"
-            >
-              删除
+              重跑
             </el-button>
           </template>
         </DataTable>
-
-        <el-divider content-position="left">执行路线</el-divider>
-        <el-scrollbar max-height="220px">
-          <el-descriptions v-for="row in rows" :key="row.taskRunId" :column="1" border size="small" class="run-route">
-            <el-descriptions-item :label="row.taskRunId">
-              <span class="text-mono">{{ routePreview(row.route) || '未记录路线' }}</span>
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-scrollbar>
       </section>
     </AsyncSection>
   </div>
@@ -199,15 +158,11 @@ function resetFilters() {
 
 <style scoped>
 .filter-search {
-  width: 240px;
+  width: 260px;
 }
 
 .filter-select {
   width: 140px;
-}
-
-.run-route + .run-route {
-  margin-top: 8px;
 }
 
 @media (max-width: 900px) {

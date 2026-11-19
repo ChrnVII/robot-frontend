@@ -6,7 +6,7 @@ import { Delete, Plus, Refresh, Select } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncSection from '@/components/AsyncSection.vue'
-import { STATION_TYPES, createStation, listStations, saveStations, stationTypeLabel } from '@/api/map'
+import { STATION_TYPES, createStation, fetchMap, saveStations, stationTypeLabel } from '@/api/map'
 import { unwrap } from '@/api/envelope'
 import { useAsyncData } from '@/composables/useAsyncData'
 import { useAsyncTask } from '@/composables/useAsyncTask'
@@ -27,7 +27,9 @@ function serialize(rows) {
 const dirty = computed(() => serialize(stations.value) !== snapshot.value)
 
 const { loading, error, load } = useAsyncData(async () => {
-  const rows = await listStations()
+  const { mapVersion: version, stations: rows } = await fetchMap()
+  // 版本号以服务端为准：保存要带它才能过乐观锁校验。
+  if (version) mapVersion.value = version
   const next = rows.map((row, index) => ({ ...createStation(index + 1), ...row }))
   stations.value = next
   snapshot.value = serialize(next)
@@ -111,10 +113,24 @@ async function save() {
     return
   }
   const result = await run('save', async () => {
-    const response = await saveStations(stations.value, mapVersion.value)
-    const payload = unwrap(response, {})
-    if (payload.mapVersion) mapVersion.value = payload.mapVersion
-    return payload
+    try {
+      const response = await saveStations(stations.value, mapVersion.value)
+      const payload = unwrap(response, {})
+      if (payload.mapVersion) mapVersion.value = payload.mapVersion
+      return payload
+    } catch (reason) {
+      // 版本冲突（别人先保存过）：把服务端版本同步过来，保留本地编辑，让用户再点一次。
+      // 不做自动重存——用户的修改可能有意图，静默覆盖别人的改动更危险。
+      const conflict = reason?.code === 'VALIDATION_ERROR' || Number(reason?.status) === 400
+      if (conflict) {
+        const { mapVersion: latest } = await fetchMap()
+        if (latest && latest !== mapVersion.value) {
+          mapVersion.value = latest
+          throw new Error(`地图已被他人更新到 v${latest}，本地修改仍在，请再点一次「保存地图」`)
+        }
+      }
+      throw reason
+    }
   }, { success: '地图站点保存成功' })
   if (result !== undefined) {
     // 保存成功后把当前值作为新快照，dirty 立即归零

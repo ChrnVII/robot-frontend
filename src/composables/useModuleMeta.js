@@ -3,7 +3,7 @@
 // 且「运行总览」和「智能检测」都用了 Odometer、「任务管理」和「默认任务」都用 Document，
 // 侧栏出现两个一模一样的图标。这里统一收敛并给每个入口配唯一图标。
 import {
-  Bell, Connection, Cpu, DataLine, Document, Files, Guide, MapLocation, Monitor,
+  Bell, Connection, Cpu, DataLine, Document, Files, Film, Guide, MapLocation, Monitor,
   Operation, Setting, Van, VideoCamera
 } from '@element-plus/icons-vue'
 
@@ -19,6 +19,7 @@ export const NAV_GROUPS = [
 export const MODULE_META = {
   home: { icon: Monitor, group: 'overview' },
   detect: { icon: Cpu, group: 'overview' },
+  capture: { icon: Film, group: 'overview' },
   cam: { icon: VideoCamera, group: 'control' },
   lift: { icon: Operation, group: 'control' },
   agv: { icon: Van, group: 'control' },

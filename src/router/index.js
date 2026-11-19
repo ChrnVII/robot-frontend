@@ -14,9 +14,15 @@ const routes = [
     component: () => import('../views/HomeView.vue')
   },
   {
-    path: '/params', // 参数设置
+    path: '/capture', // 手动采集（不依赖巡检任务）
+    name: 'capture',
+    meta: { title: '手动采集' },
+    component: () => import('../views/CaptureView.vue')
+  },
+  {
+    path: '/params', // 运行环境（只读：模式 / 模型 / 设备清单）
     name: 'parameters',
-    meta: { title: '参数设置' },
+    meta: { title: '运行环境' },
     component: () => import('../views/ParametersView.vue')
   },
   {

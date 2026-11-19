@@ -34,8 +34,24 @@ export function createStation(index = 1) {
   }
 }
 
+/**
+ * 读取站点表与当前版本号。
+ * 后端 GET 返回 { mapVersion, stations, rows }：版本号必须一起拿回来，
+ * 否则保存时的乐观锁永远拿旧版本去比对，服务端一旦涨版本就再也存不进去。
+ */
+export async function fetchMap(params = {}) {
+  const body = unwrap(await request({ url: '/api/v1/map/stations', method: 'get', params }), {})
+  const stations = Array.isArray(body) ? body : unwrapRows(body, [])
+  return {
+    mapVersion: Number(body?.mapVersion) || 1,
+    stations
+  }
+}
+
+/** 只要站点列表的旧用法（兼容保留）。 */
 export async function listStations(params = {}) {
-  return unwrapRows(await request({ url: '/api/v1/map/stations', method: 'get', params }), [])
+  const { stations } = await fetchMap(params)
+  return stations
 }
 
 export async function saveStations(stations = [], mapVersion) {

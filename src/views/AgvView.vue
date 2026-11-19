@@ -2,7 +2,7 @@
 // 移动底盘：遥测展示 + 任务控制。
 // 遥测由 composables/useTelemetry.js 统一负责（快照 + 轮询 + WebSocket 升级），
 // 命令按钮的 target/action 映射在 api/devices.js，页面只传语义命令名。
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive } from 'vue'
 import {
   Aim, Bell, CaretRight, Close, Coin, Lightning, Moon, Open, Refresh, Sunrise, SwitchButton, VideoPause
 } from '@element-plus/icons-vue'
@@ -14,7 +14,6 @@ import { ROBOT_COMMANDS, TASK_MODES, needsConfirmation, robotCommandLabel, sendR
 import { useTelemetry } from '@/composables/useTelemetry'
 import { useAsyncTask } from '@/composables/useAsyncTask'
 import { useRefreshFeedback } from '@/composables/useRefreshFeedback'
-import { useBreakpoint } from '@/composables/useBreakpoint'
 import { displayNumber, formatTime, percentStatus } from '@/utils/format'
 
 // 命令按钮图标：仅用于视觉区分，不影响命令语义。
@@ -33,7 +32,7 @@ const COMMAND_ICONS = {
   gotoStation: SwitchButton
 }
 
-const { telemetry, loading, error, updatedAt, refresh } = useTelemetry()
+const { state: rawState, telemetry, loading, error, updatedAt, refresh } = useTelemetry()
 const { pendingKey, run } = useAsyncTask()
 const { refresh: refreshWithFeedback } = useRefreshFeedback()
 
@@ -47,12 +46,33 @@ async function refreshTelemetry() {
 }
 
 const controls = reactive({ task: '', station: '', mode: '0' })
-const showDetails = ref(true)
+
+//: 底盘页关心的设备。motion / lift 现在仍是模拟器，直接列出数据源比藏起来更诚实。
+const AGV_DEVICE_IDS = ['motion', 'lift', 'battery']
+
+const deviceMap = computed(() => rawState.value?.devices || {})
+
+const agvDevices = computed(() => AGV_DEVICE_IDS
+  .filter((id) => deviceMap.value[id])
+  .map((id) => {
+    const item = deviceMap.value[id] || {}
+    return {
+      deviceId: item.deviceId || id,
+      health: String(item.health || ''),
+      source: String(item.source || ''),
+      sampledAt: item.sampledAt || ''
+    }
+  }))
+
+const simulatedDevices = computed(() => agvDevices.value
+  .filter((item) => item.source === 'simulator')
+  .map((item) => item.deviceId))
+
+const liftHint = computed(() => (
+  deviceMap.value.lift?.source === 'simulator' ? '模拟驱动，数值不随真机变化' : ''
+))
 
 const state = computed(() => telemetry.value || {})
-// 位姿与主机状态共 12 项，窄屏从 4 列降到 2 列，避免每格被压成一条竖线。
-const isNarrow = useBreakpoint()
-const descColumns = computed(() => (isNarrow.value ? 2 : 4))
 const statusType = computed(() => (/error|fail/i.test(String(state.value.status)) ? 'danger' : /charging|running/i.test(String(state.value.status)) ? 'success' : 'info'))
 const updatedText = computed(() => (updatedAt.value ? formatTime(updatedAt.value) : ''))
 
@@ -107,33 +127,54 @@ function quickStop() {
     <!-- 骨架屏只在首次读取（尚未失败过）时出现；一旦出错就保持页面框架 + 顶部错误条 -->
     <AsyncSection :loading="loading && !updatedAt && !error" :error="error" loading-text="正在读取机器人状态…" @retry="refresh">
       <div class="metric-grid">
+        <!-- 卡片只放后端真实上报的读数：电量来自 BMS、温湿度/光照/风速来自环境串口。
+             原来这里的「当前任务 / 当前站点」取自 robot-core 并不上报的 task 字段，
+             永远是横杠；已删除，任务进度请看「任务管理」的运行记录。 -->
         <MetricCard label="剩余电量" :value="displayNumber(state.battery)" unit="%" :type="percentStatus(state.battery)" />
-        <MetricCard label="当前任务" :value="state.task ?? '—'" :hint="state.paused ? '任务已暂停' : '任务运行中'" type="primary" />
-        <MetricCard label="当前站点" :value="state.station ?? '—'" :hint="`鸡笼 ${state.cage ?? '—'} · 偏移 ${displayNumber(state.offset)}`" />
-        <MetricCard label="升降高度" :value="displayNumber(state.lift)" unit="mm" />
         <MetricCard label="舍内温度" :value="displayNumber(state.temperature)" unit="℃" :hint="`湿度 ${displayNumber(state.humidity, { unit: '%' })}`" />
         <MetricCard label="环境光照" :value="displayNumber(state.light)" unit="lx" :hint="`风速 ${displayNumber(state.wind, { unit: ' m/s' })}`" />
+        <MetricCard label="升降高度" :value="displayNumber(state.lift)" unit="mm" :hint="liftHint" />
       </div>
+
+      <!-- 驱动层事实：motion / lift 目前仍是模拟器，位置、姿态、任务字段不会有真实值。
+           与其画一堆横杠，不如直接说明"这一页现在能看什么、不能看什么"。 -->
+      <el-alert
+        v-if="simulatedDevices.length"
+        class="agv-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="`${simulatedDevices.join('、')} 为模拟驱动（simulator）`"
+        description="这些设备的位置 / 姿态 / 运动状态不会随真机变化，指令回执也不代表设备已动作。真实可用的只有电量与环境读数。"
+      />
 
       <section class="view-panel agv-position">
         <div class="view-panel__head">
-          <h2>位姿与主机状态</h2>
-          <el-button text type="primary" @click="showDetails = !showDetails">{{ showDetails ? '收起' : '展开' }}</el-button>
+          <h2>设备状态</h2>
+          <small>数据来自 robot-core 自检 · 数据源含 simulator 才是模拟</small>
         </div>
-        <el-descriptions v-if="showDetails" :column="descColumns" border size="small">
-          <el-descriptions-item label="X 坐标">{{ displayNumber(state.x) }}</el-descriptions-item>
-          <el-descriptions-item label="Y 坐标">{{ displayNumber(state.y) }}</el-descriptions-item>
-          <el-descriptions-item label="YAW">{{ displayNumber(state.yaw, { unit: '°' }) }}</el-descriptions-item>
-          <el-descriptions-item label="位置">{{ state.position ?? '—' }}</el-descriptions-item>
-          <el-descriptions-item label="固件版本">{{ state.firmware || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="SDK">{{ state.sdk || '—' }}</el-descriptions-item>
-          <el-descriptions-item label="CPU">{{ displayNumber(state.cpu, { unit: '%' }) }}</el-descriptions-item>
-          <el-descriptions-item label="磁盘">{{ displayNumber(state.disk, { unit: '%' }) }}</el-descriptions-item>
-          <el-descriptions-item label="CO₂">{{ displayNumber(state.co2, { allowNegative: false }) }}</el-descriptions-item>
-          <el-descriptions-item label="氨气">{{ displayNumber(state.ammonia, { allowNegative: false }) }}</el-descriptions-item>
-          <el-descriptions-item label="站点总数">{{ state.total ?? '—' }}</el-descriptions-item>
-          <el-descriptions-item label="暂停状态">{{ state.paused ? '已暂停' : '未暂停' }}</el-descriptions-item>
-        </el-descriptions>
+        <el-table :data="agvDevices" size="small" border>
+          <template #empty>
+            <el-empty description="robot-core 未上报底盘设备" :image-size="60" />
+          </template>
+          <el-table-column prop="deviceId" label="设备" width="120" />
+          <el-table-column label="健康" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" effect="light" :type="row.health === 'ok' ? 'success' : 'warning'">
+                {{ row.health === 'ok' ? '正常' : row.health || '未知' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="数据源" min-width="160">
+            <template #default="{ row }">
+              <span class="mono">{{ row.source || '—' }}</span>
+              <el-tag v-if="row.source === 'simulator'" size="small" type="info" effect="plain" class="sim-tag">模拟</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="最近采样" width="180">
+            <template #default="{ row }">{{ row.sampledAt ? formatTime(row.sampledAt) : '—' }}</template>
+          </el-table-column>
+        </el-table>
       </section>
 
       <section class="view-panel">
@@ -204,5 +245,19 @@ function quickStop() {
 .command-button {
   width: 100%;
   margin-left: 0 !important;
+}
+
+.agv-alert {
+  margin-bottom: var(--app-gap);
+}
+
+/* 数据源等宽显示：一眼区分 ttyS0@9600 与 simulator */
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.sim-tag {
+  margin-left: 6px;
 }
 </style>

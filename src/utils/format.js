@@ -45,3 +45,13 @@ export function percentStatus(value) {
   if (number >= 25) return 'warning'
   return 'danger'
 }
+
+/** 字节数转可读大小（录像/录音产物用）。未知值给横杠，不要给 0 B。 */
+export function formatBytes(value) {
+  const size = Number(value)
+  if (!Number.isFinite(size) || size < 0) return '—'
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`
+}

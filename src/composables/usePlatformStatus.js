@@ -17,7 +17,10 @@ const ALERT_INTERVAL = 20000
 export function usePlatformStatus() {
   const notifier = useAlertNotifier()
 
-  const online = ref(false)
+  const online = ref(false)          // 兼容旧调用方：等价于 status === 'ok'
+  const reachable = ref(false)       // 后端 HTTP 有响应（/healthz 拿到 200）
+  const coreReady = ref(false)       // /healthz 的 coreStatus 为 ok
+  const coreStatus = ref('')         // ok / unavailable / 空
   const checked = ref(false) // 是否完成过一次检查（决定显示「检测中」还是「离线」）
   const robotId = ref('')
   const robotName = ref('')
@@ -35,18 +38,27 @@ export function usePlatformStatus() {
 
   const status = computed(() => {
     if (!checked.value) return 'checking'
-    return online.value ? 'online' : 'offline'
+    if (!reachable.value) return 'offline'
+    // 后端 HTTP 活着不等于机器人可用：/healthz 在 robot-core 不可达时仍返回 200，
+    // 只是把 body 里的 status 写成 degraded、coreStatus 写成 unavailable。
+    // 以前只看「有没有响应对象」，于是核心挂了侧栏照样是绿灯。
+    return coreReady.value ? 'ok' : 'degraded'
   })
 
   const statusText = computed(() => {
     if (status.value === 'checking') return '正在检测后端'
-    return online.value ? '系统在线' : '后端离线'
+    if (status.value === 'offline') return '后端离线'
+    if (status.value === 'degraded') return '机器人核心离线'
+    return '系统在线'
   })
 
   const statusHint = computed(() => {
-    if (error.value) return error.value
     if (status.value === 'checking') return '首次健康检查进行中'
-    if (!online.value) return '健康检查未通过，请检查后端服务'
+    if (status.value === 'offline') return error.value || '健康检查未通过，请检查后端服务'
+    if (status.value === 'degraded') {
+      // 后端在、核心不在：设备数据与命令会失败，界面必须说清楚是哪一层断了。
+      return `后端在线，但 robot-core 未就绪（${coreStatus.value || 'unavailable'}）`
+    }
     return latencyMs.value === null ? '后端连接正常' : `后端连接正常 · ${latencyMs.value} ms`
   })
 
@@ -64,7 +76,13 @@ export function usePlatformStatus() {
       const health = healthResult.status === 'fulfilled' ? unwrap(healthResult.value, null) : null
       const info = platformResult.status === 'fulfilled' ? unwrap(platformResult.value, {}) : {}
 
-      online.value = Boolean(health)
+      // 三层判断：有无响应 → 核心是否就绪 → 才算在线。
+      reachable.value = Boolean(health)
+      const reported = String(health?.coreStatus || '')
+      coreStatus.value = reported
+      // healthz 有 coreStatus 就认它；没有（极旧后端）退回 status 字段。
+      coreReady.value = reachable.value && (reported ? reported === 'ok' : String(health?.status || '') === 'ok')
+      online.value = coreReady.value
       latencyMs.value = Math.round(performance.now() - startedAt)
       robotId.value = info?.robotId || health?.robotId || robotId.value
       robotName.value = info?.name || health?.name || robotName.value
@@ -171,6 +189,9 @@ export function usePlatformStatus() {
   // 会导致 :status="platform.status" 传进一个对象、离线横幅永远不出现。
   return reactive({
     online,
+    reachable,
+    coreReady,
+    coreStatus,
     checked,
     status,
     statusText,

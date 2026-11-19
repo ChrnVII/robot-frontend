@@ -77,6 +77,53 @@ export function getInspectionConfig(params) {
   })
 }
 
+/**
+ * 当前正在跑的检测/采集任务（没有则 data.state === 'idle'）。
+ *
+ * inspection-worker 同时只允许一个任务：前端靠它显示"正在跑什么"，并拦截第二个启动请求。
+ * 刷新页面、换标签页都不会丢状态——状态在 worker 进程里，不在浏览器里。
+ */
+export function getActiveInspection() {
+  return request({ url: '/api/v1/inspections/active', method: 'get' })
+}
+
+/** 任务目录内单个产物的下载地址（相对路径，如 cam01/video.mkv）。 */
+export function inspectionFileUrl(taskRunId, path) {
+  const base = String(import.meta.env.VITE_SERVER_URL || '').replace(/\/$/, '')
+  return `${base}/api/v1/inspections/${encodeURIComponent(taskRunId)}/file?path=${encodeURIComponent(path)}`
+}
+
+/**
+ * 以 Blob 方式取任务产物。
+ * 生产开启鉴权后 `<video src>`/`<a href>` 带不上 Authorization 头，必须走 axios。
+ */
+export async function fetchInspectionFileBlob(taskRunId, path) {
+  const response = await request({
+    url: `/api/v1/inspections/${encodeURIComponent(taskRunId)}/file`,
+    method: 'get',
+    params: { path },
+    responseType: 'blob',
+    timeout: 120000
+  })
+  return response.data
+}
+
+/**
+ * MKV 预览地址：后端只转封装不重编码，返回浏览器可播的 MP4（支持 Range）。
+ * 只有受管目录（cams / adhoc / missions / dome-cam）内的文件允许预览。
+ */
+export async function fetchPreviewBlob(absolutePath) {
+  const response = await request({
+    url: '/api/v1/media/preview',
+    method: 'get',
+    params: { path: absolutePath },
+    responseType: 'blob',
+    // 首次预览要等后端转封装，给足时间；命中缓存时是毫秒级。
+    timeout: 180000
+  })
+  return response.data
+}
+
 function acquireControlLease(data) {
   return request({
     url: '/api/v1/control/leases',

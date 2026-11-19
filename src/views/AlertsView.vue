@@ -11,7 +11,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncSection from '@/components/AsyncSection.vue'
 import DataTable from '@/components/DataTable.vue'
 import {
-  ALERT_LEVELS, ALERT_STATUSES, alertLevelMeta, alertStatusMeta,
+  ALERT_HANDLE_STATUSES, ALERT_LEVELS, ALERT_STATUSES, alertLevelMeta, alertStatusMeta,
   deleteAlert, fetchAlertsPage, handleAlert
 } from '@/api/alerts'
 import { useServerTable } from '@/composables/useServerTable'
@@ -38,18 +38,19 @@ const {
   rows, total, page, pageSize, loading, error, load, search, reload, setPage, setPageSize
 } = useServerTable(fetchAlertsPage, { pageSize: 10 })
 
+// 列只放后端真实返回的字段。此前有 站点/鸡笼/层/图片名称 四列，
+// 而 alerts 表的 _to_public 对这几项恒返回 null/空串（新链路没有这些维度），
+// 结果四列永远空白——宁可删掉，也不要用空格子把表撑宽。
 const columns = [
   { prop: 'createdAt', label: '告警时间', width: 170, formatter: (row) => formatTime(row.createdAt) },
   { prop: 'level', label: '等级', width: 90, slot: 'level' },
   { prop: 'type', label: '告警类型', width: 130, formatter: (row) => row.type || '—' },
   { prop: 'status', label: '处理状态', width: 110, slot: 'status' },
-  { prop: 'station', label: '站点', width: 80 },
-  { prop: 'cage', label: '鸡笼', width: 80 },
-  { prop: 'layer', label: '层', width: 70 },
-  { prop: 'content', label: '告警内容', minWidth: 220, showOverflowTooltip: true },
-  { prop: 'result', label: '处理结果', minWidth: 160, formatter: (row) => row.result || '—' },
+  { prop: 'content', label: '告警内容', minWidth: 240, showOverflowTooltip: true },
+  { prop: 'result', label: '处理结果', minWidth: 150, formatter: (row) => row.result || '—' },
+  { prop: 'handledBy', label: '处理人', width: 120, formatter: (row) => row.handledBy || '—' },
+  { prop: 'handledAt', label: '处理时间', width: 170, formatter: (row) => (row.handledAt ? formatTime(row.handledAt) : '—') },
   { prop: 'taskRunId', label: '执行 ID', width: 180, slot: 'run' },
-  { prop: 'imageName', label: '图片名称', width: 200, showOverflowTooltip: true },
   { prop: 'actions', label: '操作', width: 170, fixed: 'right', slot: 'actions' }
 ]
 
@@ -308,7 +309,8 @@ function resetFilters() {
         </el-form-item>
         <el-form-item label="处理状态">
           <el-radio-group v-model="handleForm.status">
-            <el-radio v-for="item in ALERT_STATUSES" :key="item.value" :value="item.value">{{ item.label }}</el-radio>
+            <!-- 只用后端接受的 handled / closed；acknowledged 提交会 400，见 api/alerts.js -->
+            <el-radio v-for="item in ALERT_HANDLE_STATUSES" :key="item.value" :value="item.value">{{ item.label }}</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="处理说明">

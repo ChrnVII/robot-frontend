@@ -33,7 +33,11 @@ const MOTION_LABELS = {
 
 const config = reactive({ speed: 4096, accel: 100, downLimit: -20, upLimit: 1140 })
 const target = reactive({ height: 0 })
-const state = reactive({ height: 0, faultCode: 0, enabled: false, motion: 'idle' })
+// 初值一律 null：模拟驱动不报 height / enabled / faultCode，
+// 若用 0 / false 兜底，页面上会显示「0 mm、未使能、无故障」——把"读不到"伪装成"读到了 0"。
+const state = reactive({ height: null, faultCode: null, enabled: null, motion: '' })
+// 数据源：serial 是真驱动器，simulator 说明这一页的数值都是模拟出来的。
+const source = ref('')
 
 const { pendingKey, run } = useAsyncTask()
 const { refresh: refreshWithFeedback } = useRefreshFeedback()
@@ -42,20 +46,24 @@ const { loading, error, load } = useAsyncData(() => getLiftState(), { initialDat
 let pollTimer = null
 const lastSyncError = ref('')
 
-const motionLabel = computed(() => MOTION_LABELS[state.motion] || state.motion || '未知')
+const motionLabel = computed(() => MOTION_LABELS[state.motion] || state.motion || '—')
+const enabledLabel = computed(() => (
+  state.enabled === null ? '状态未上报' : state.enabled ? '已使能' : '未使能'
+))
 const heightRange = computed(() => [Number(config.downLimit) || 0, Number(config.upLimit) || 0])
 const busy = computed(() => Boolean(pendingKey.value))
 
 function applyState(response) {
   const next = unwrap(response, null)
   if (!next || typeof next !== 'object') return
+  if (next.source) source.value = String(next.source)
   ;['height', 'faultCode', 'enabled', 'motion'].forEach((key) => {
     if (next[key] !== undefined && next[key] !== null) state[key] = next[key]
   })
   ;['speed', 'accel', 'downLimit', 'upLimit'].forEach((key) => {
     if (next[key] !== undefined && next[key] !== null) config[key] = next[key]
   })
-  target.height = Number(state.height) || 0
+  if (state.height !== null && state.height !== undefined) target.height = Number(state.height) || 0
 }
 
 /** 下发指令后回读一次状态，让页面上的高度/状态跟随设备变化。 */
@@ -168,8 +176,8 @@ onBeforeUnmount(() => {
     <PageHeader
       title="升降控制"
       :description="`当前高度 ${displayNumber(state.height, { unit: ' mm' })} · ${motionLabel}`"
-      :status-text="state.enabled ? '已使能' : '未使能'"
-      :status-type="state.enabled ? 'success' : 'info'"
+      :status-text="state.enabled === null ? '状态未上报' : state.enabled ? '已使能' : '未使能'"
+      :status-type="state.enabled === null ? 'info' : state.enabled ? 'success' : 'warning'"
     >
       <template #extra>
         <el-button :icon="Refresh" :loading="loading" @click="refreshStatus">刷新状态</el-button>
@@ -195,14 +203,26 @@ onBeforeUnmount(() => {
     </PageHeader>
 
     <AsyncSection :loading="loading" :error="error" loading-text="正在读取升降状态…" @retry="load">
+      <!-- 数据源为 simulator 时，本页所有数值（高度/使能/故障）都是模拟出来的，
+           按钮回执也不代表真机动作。必须显式说明，否则看着像"设备不动但指令成功"。 -->
+      <el-alert
+        v-if="source === 'simulator'"
+        class="lift-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="升降驱动为模拟器（simulator）"
+        description="高度、使能状态、故障码均为模拟值，指令不会驱动真实升降机构。接入真机后此处会显示串口数据源。"
+      />
+
       <div class="metric-grid lift-metrics">
         <MetricCard label="当前位置" :value="displayNumber(state.height)" unit="mm" type="primary" />
-        <MetricCard label="升降状态" :value="motionLabel" :hint="state.enabled ? '驱动器已使能' : '等待使能'" />
+        <MetricCard label="升降状态" :value="motionLabel" :hint="enabledLabel" />
         <MetricCard
           label="故障码"
-          :value="state.faultCode"
-          :hint="state.faultCode ? '存在故障，建议先清除' : '无故障'"
-          :type="state.faultCode ? 'danger' : 'success'"
+          :value="state.faultCode === null ? '—' : state.faultCode"
+          :hint="state.faultCode === null ? '设备未上报' : state.faultCode ? '存在故障，建议先清除' : '无故障'"
+          :type="state.faultCode === null ? 'info' : state.faultCode ? 'danger' : 'success'"
         />
         <MetricCard label="行程范围" :value="`${heightRange[0]} ~ ${heightRange[1]}`" unit="mm" hint="下限位 / 上限位" />
       </div>
@@ -340,5 +360,9 @@ onBeforeUnmount(() => {
 
 .lift-tip {
   margin-top: var(--app-gap-inner);
+}
+
+.lift-alert {
+  margin-bottom: var(--app-gap);
 }
 </style>
