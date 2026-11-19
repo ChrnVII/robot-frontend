@@ -111,12 +111,22 @@ const durationSeconds = computed(() => {
   return Math.max(0, Math.round((Number(minutes) || 0) * 60))
 })
 
+// 终态时刻（毫秒）：任务结束后用它把已用时长钉住。
+// 之前只有每秒刷新的 now，结束采集后定时器没停，时长会一直往上涨。
+const frozenAt = ref(null)
+
+function toMillis(value) {
+  if (value === undefined || value === null || value === '') return null
+  const ms = typeof value === 'number' ? value * 1000 : Date.parse(String(value))
+  return Number.isFinite(ms) ? ms : null
+}
+
 const elapsedText = computed(() => {
-  const started = task.value?.startedAt
-  if (!started) return '—'
-  const startMs = typeof started === 'number' ? started * 1000 : Date.parse(String(started))
-  if (!Number.isFinite(startMs)) return '—'
-  const seconds = Math.max(0, Math.floor((now.value - startMs) / 1000))
+  const started = toMillis(task.value?.startedAt)
+  if (started === null) return '—'
+  // 优先用后端 finishedAt 结算（引擎收尾时写入，精确）；没有就冻结在第一次看到终态的时刻。
+  const end = toMillis(task.value?.finishedAt) ?? frozenAt.value ?? now.value
+  const seconds = Math.max(0, Math.floor((end - started) / 1000))
   const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
   const ss = String(seconds % 60).padStart(2, '0')
   return `${mm}:${ss}`
@@ -174,7 +184,10 @@ function startPolling() {
     if (document.hidden) return
     await refreshStatus()
     if (!running.value) {
+      // 任务已经结束：停掉每秒刷新，并把已用时长钉在当前时刻（有 finishedAt 就以后端为准）。
+      if (frozenAt.value === null) frozenAt.value = Date.now()
       stopPolling()
+      stopTicking()
       active.refresh()
     }
   }, POLL_INTERVAL)
@@ -206,6 +219,7 @@ async function start() {
     }), {})
     if (!value?.taskRunId) throw new Error('后端未返回任务编号')
     task.value = { state: 'starting', cameraIds: [...selected.value], ...value }
+    frozenAt.value = null
     statusError.value = ''
     startTicking()
     startPolling()
